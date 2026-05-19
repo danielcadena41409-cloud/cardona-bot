@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cardona Notify — Rich EOD journal email via SendGrid."""
+"""Cardona Notify — EOD journal email via SendGrid."""
 
 import json
 import os
@@ -17,8 +17,10 @@ SENDGRID_URL = "https://api.sendgrid.com/v3/mail/send"
 OPTION_RE    = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
 TP_THRESHOLD = 0.90
 
-SYMBOLS      = ["SPY", "QQQ", "TSLA", "AAPL", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "GLD"]
-FIXED_OTM    = {"SPY", "QQQ"}
+SYMBOLS   = ["SPY", "QQQ", "TSLA", "AAPL", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "GLD"]
+FIXED_OTM = {"SPY", "QQQ"}
+WATCHLIST = set(SYMBOLS)
+
 TIMEFRAME    = "1Hour"
 LOOKBACK_DAYS   = 10
 LAST_N_BARS     = 20
@@ -27,6 +29,17 @@ SIGNAL_LOOKBACK = 5
 ROUND_STEP   = 5
 ROUND_RANGE  = 30
 PROXIMITY    = 0.005
+
+# ── Colors ─────────────────────────────────────────────────────────────────────
+BG     = "#080c14"
+CARD   = "#0d1117"
+BORDER = "#1a2332"
+TEXT   = "#c9d1d9"
+DIM    = "#484f58"
+GREEN  = "#00ff88"
+RED    = "#ff4d4d"
+YELLOW = "#ffd60a"
+WHITE  = "#ffffff"
 
 
 # ── Environment ────────────────────────────────────────────────────────────────
@@ -70,14 +83,13 @@ def get_account() -> dict:
 
 def get_orders_today(today: str) -> list:
     try:
-        params = {
-            "status":    "all",
-            "after":     f"{today}T00:00:00Z",
-            "limit":     100,
-            "direction": "desc",
-        }
-        r = requests.get(f"{TRADE_URL}/orders", headers=_alpaca_hdrs(),
-                         params=params, timeout=15)
+        r = requests.get(
+            f"{TRADE_URL}/orders",
+            headers=_alpaca_hdrs(),
+            params={"status": "all", "after": f"{today}T00:00:00Z",
+                    "limit": 100, "direction": "desc"},
+            timeout=15,
+        )
         return r.json() if r.ok else []
     except Exception:
         return []
@@ -90,15 +102,9 @@ def fetch_bars(symbol: str) -> list:
         "%Y-%m-%dT%H:%M:%SZ"
     )
     headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
-    params  = {
-        "timeframe":  TIMEFRAME,
-        "start":      start,
-        "feed":       "sip",
-        "limit":      1000,
-        "adjustment": "raw",
-    }
-    url  = f"{DATA_URL}/stocks/{symbol}/bars"
-    bars = []
+    params  = {"timeframe": TIMEFRAME, "start": start,
+                "feed": "sip", "limit": 1000, "adjustment": "raw"}
+    url, bars = f"{DATA_URL}/stocks/{symbol}/bars", []
     while True:
         try:
             r = requests.get(url, headers=headers, params=params, timeout=15)
@@ -124,9 +130,8 @@ def is_hammer(bar: dict) -> bool:
     rng = h - l
     if rng == 0:
         return False
-    body       = c - o
-    lower_tail = o - l
-    return lower_tail >= 2 * body and (o - l) / rng >= 2 / 3
+    body = c - o
+    return (o - l) >= 2 * body and (o - l) / rng >= 2 / 3
 
 
 def is_hanging_man(bar: dict) -> bool:
@@ -136,12 +141,9 @@ def is_hanging_man(bar: dict) -> bool:
     rng = h - l
     if rng == 0:
         return False
-    body       = o - c
-    lower_tail = c - l
-    return lower_tail >= 2 * body and (c - l) / rng >= 2 / 3
+    body = o - c
+    return (c - l) >= 2 * body and (c - l) / rng >= 2 / 3
 
-
-# ── S/R and trend ──────────────────────────────────────────────────────────────
 
 def _dedup(levels: list, tol: float = 0.003) -> list:
     out: list = []
@@ -152,18 +154,14 @@ def _dedup(levels: list, tol: float = 0.003) -> list:
 
 
 def find_support(bars: list) -> list:
-    lows = [
-        bar["l"] for bar in bars[-LAST_N_BARS:]
-        if bar["c"] > bar["o"] and (bar["o"] - bar["l"]) > 0
-    ]
+    lows = [b["l"] for b in bars[-LAST_N_BARS:]
+            if b["c"] > b["o"] and (b["o"] - b["l"]) > 0]
     return _dedup(sorted(lows))
 
 
 def find_resistance(bars: list) -> list:
-    highs = [
-        bar["h"] for bar in bars[-LAST_N_BARS:]
-        if bar["c"] < bar["o"] and (bar["h"] - bar["o"]) > 0
-    ]
+    highs = [b["h"] for b in bars[-LAST_N_BARS:]
+             if b["c"] < b["o"] and (b["h"] - b["o"]) > 0]
     return _dedup(sorted(highs, reverse=True))
 
 
@@ -200,37 +198,30 @@ def find_signals(bars: list, supports: list, resistances: list) -> list:
         return signals
     start = max(0, len(bars) - SIGNAL_LOOKBACK - 1)
     for i in range(start, len(bars) - 1):
-        sig  = bars[i]
-        conf = bars[i + 1]
+        sig, conf = bars[i], bars[i + 1]
         if is_hammer(sig):
             matched = [s for s in supports if _near(sig["l"], s)]
             if matched:
                 lvl = min(matched, key=lambda s: abs(s - sig["l"]))
                 signals.append({
-                    "type":       "CALL",
-                    "pattern":    "Hammer",
-                    "time":       sig["t"],
-                    "close":      sig["c"],
-                    "conf_close": conf["c"],
-                    "level":      lvl,
-                    "level_tag":  "support",
-                    "confirmed":  conf["c"] > conf["o"],
-                    "conf_time":  conf["t"],
+                    "type": "CALL", "pattern": "Hammer",
+                    "time": sig["t"], "close": sig["c"],
+                    "conf_close": conf["c"], "level": lvl,
+                    "level_tag": "support",
+                    "confirmed": conf["c"] > conf["o"],
+                    "conf_time": conf["t"],
                 })
         if is_hanging_man(sig):
             matched = [r for r in resistances if _near(sig["h"], r)]
             if matched:
                 lvl = min(matched, key=lambda r: abs(r - sig["h"]))
                 signals.append({
-                    "type":       "PUT",
-                    "pattern":    "Hanging Man",
-                    "time":       sig["t"],
-                    "close":      sig["c"],
-                    "conf_close": conf["c"],
-                    "level":      lvl,
-                    "level_tag":  "resistance",
-                    "confirmed":  conf["c"] < conf["o"],
-                    "conf_time":  conf["t"],
+                    "type": "PUT", "pattern": "Hanging Man",
+                    "time": sig["t"], "close": sig["c"],
+                    "conf_close": conf["c"], "level": lvl,
+                    "level_tag": "resistance",
+                    "confirmed": conf["c"] < conf["o"],
+                    "conf_time": conf["t"],
                 })
     return signals
 
@@ -253,37 +244,27 @@ def scan_all() -> list:
             results.append({"symbol": symbol, "error": "no data"})
             print(" no data")
             continue
-
         price   = bars[-1]["c"]
         trend   = market_trend(bars)
         sup     = find_support(bars)
         res     = find_resistance(bars)
         rnds    = round_number_levels(price)
-
         sup_all = sorted(set(sup) | {r for r in rnds if r < price})
         res_all = sorted((set(res) | {r for r in rnds if r > price}), reverse=True)
         signals = find_signals(bars, sup_all, res_all)
-
         top_sup = [s for s in sorted(sup_all, reverse=True) if s < price][:2]
         top_res = [r for r in res_all if r > price][:2]
-
         results.append({
-            "symbol":         symbol,
-            "price":          price,
-            "trend":          trend,
-            "support":        sup,
-            "resistance":     res,
-            "top_support":    top_sup,
-            "top_resistance": top_res,
-            "signals":        signals,
-            "last_bar_time":  bars[-1]["t"],
+            "symbol": symbol, "price": price, "trend": trend,
+            "top_support": top_sup, "top_resistance": top_res,
+            "signals": signals, "last_bar_time": bars[-1]["t"],
         })
         sig_label = f"{len(signals)} signal(s)" if signals else "no signals"
         print(f" ${price:.2f} {trend} {sig_label}")
     return results
 
 
-# ── OCC parser ─────────────────────────────────────────────────────────────────
+# ── OCC / position helpers ─────────────────────────────────────────────────────
 
 def _parse_occ(sym: str) -> dict:
     m = re.match(r"^([A-Z]{1,6})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$", sym)
@@ -304,108 +285,267 @@ def _dte(expiration: str) -> int:
         return -1
 
 
-# ── Cardona position registry ─────────────────────────────────────────────────
-
-def load_cardona_position_syms() -> set:
-    """Return the set of OCC symbols Cardona owns per data/cardona_positions.json."""
+def load_cardona_positions() -> dict:
     path = Path(__file__).parent.parent / "data" / "cardona_positions.json"
     if not path.exists():
-        return set()
+        return {}
     try:
-        return set(json.loads(path.read_text()).keys())
+        return json.loads(path.read_text())
     except Exception:
-        return set()
+        return {}
 
 
 # ── Memory files ───────────────────────────────────────────────────────────────
 
-def read_lessons(n: int = 5) -> list:
+def read_lessons(n: int = 3) -> list:
     path = Path(__file__).parent.parent / "memory" / "lessons.md"
     if not path.exists():
         return []
     lines = [
         ln.strip() for ln in path.read_text().splitlines()
-        if ln.strip()
-        and not ln.startswith("#")
-        and not ln.startswith("_")
-        and ln.strip() != "---"
+        if ln.strip() and not ln.startswith("#")
+        and not ln.startswith("_") and ln.strip() != "---"
     ]
     return lines[-n:]
 
 
-def read_cycles_text() -> str:
+def read_cycles_summary() -> dict:
+    """Return {cycle_num, trades_done, wins, losses} from cycles.md."""
     path = Path(__file__).parent.parent / "memory" / "cycles.md"
-    return path.read_text() if path.exists() else ""
+    if not path.exists():
+        return {"cycle": 1, "trades": 0, "wins": 0, "losses": 0}
+    text = path.read_text()
+    # Find the last cycle heading
+    cycle_num = 1
+    for line in text.splitlines():
+        m = re.match(r"##\s+Cycle\s+(\d+)", line)
+        if m:
+            cycle_num = int(m.group(1))
+    # Count filled trade rows — a filled row has a date in the Date column.
+    # Only examine the Result column (last column before the final |).
+    trade_rows = re.findall(
+        r"\|\s*\d{4}-\d{2}-\d{2}\s*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|[^|]*\|([^|]*)\|",
+        text,
+    )
+    trades  = len(trade_rows)
+    wins    = sum(1 for r in trade_rows if re.search(r"\bW(in)?\b", r, re.I))
+    losses  = sum(1 for r in trade_rows if re.search(r"\bL(oss)?\b", r, re.I))
+    return {"cycle": cycle_num, "trades": trades,
+            "wins": wins, "losses": losses}
+
+
+# ── Self-evaluation generator ──────────────────────────────────────────────────
+
+def _generate_self_eval(scan_results: list, cardona_positions: dict,
+                        today: str) -> dict:
+    """Return {q1, q2, q3} as plain strings for inclusion in email."""
+
+    all_signals = []
+    for sr in scan_results:
+        for s in sr.get("signals", []):
+            s = dict(s)
+            s["symbol"] = sr["symbol"]
+            s["trend"]  = sr.get("trend", "sideways")
+            all_signals.append(s)
+
+    # Q1 — what was seen
+    if not all_signals:
+        q1 = ("No hammer or hanging man patterns were detected on any of the "
+               "10 symbols today. All candles failed the body/tail geometry "
+               "requirements for a valid pattern.")
+    else:
+        parts = []
+        for s in all_signals:
+            status = "confirmed" if s["confirmed"] else "unconfirmed"
+            parts.append(
+                f"{s['symbol']} {s['type']} ({s['pattern']}, {status}, "
+                f"near ${s['level']:.2f} {s['level_tag']})"
+            )
+        q1 = "Signals detected: " + " · ".join(parts) + "."
+
+    # Q2 — missed / blocked analysis
+    confirmed = [s for s in all_signals if s["confirmed"]]
+    if not confirmed:
+        watching = [s for s in all_signals if not s["confirmed"]]
+        if watching:
+            syms = ", ".join(s["symbol"] for s in watching)
+            q2 = (f"No confirmed signals to evaluate. {syms} showed a pattern "
+                  f"but the confirmation candle has not closed yet — still watching.")
+        else:
+            q2 = "No confirmed signals today. Nothing was missed; nothing qualified."
+    else:
+        missed_parts = []
+        fired_parts  = []
+        n_positions  = len(cardona_positions)
+        for s in confirmed:
+            sym       = s["symbol"]
+            sig_type  = s["type"]
+            trend     = s["trend"]
+            trend_ok  = (sig_type == "CALL" and trend == "uptrend") or \
+                        (sig_type == "PUT"  and trend == "downtrend")
+            slot_ok   = n_positions < 2
+            conf_price = s["conf_close"]
+            level      = s["level"]
+            drift      = ((conf_price - level) / level if sig_type == "CALL"
+                          else (level - conf_price) / level)
+            chase_ok   = drift <= PROXIMITY
+
+            if trend_ok and slot_ok and chase_ok:
+                fired_parts.append(f"{sym} {sig_type}")
+            elif not trend_ok:
+                need = "uptrend" if sig_type == "CALL" else "downtrend"
+                missed_parts.append(
+                    f"{sym} {sig_type} blocked — trend is {trend}, "
+                    f"{sig_type.lower()} needs {need}"
+                )
+            elif not slot_ok:
+                missed_parts.append(
+                    f"{sym} {sig_type} blocked — position limit reached ({n_positions}/2)"
+                )
+            elif not chase_ok:
+                missed_parts.append(
+                    f"{sym} {sig_type} blocked — price drifted "
+                    f"{drift*100:.2f}% past level (max 0.5%)"
+                )
+
+        lines = []
+        if fired_parts:
+            lines.append("Fired: " + ", ".join(fired_parts) + ".")
+        if missed_parts:
+            lines.append("Missed: " + " · ".join(missed_parts) + ".")
+        if not lines:
+            lines.append("No confirmed signals fired or missed today.")
+        q2 = " ".join(lines)
+
+    # Q3 — what to watch tomorrow
+    watching = [s for s in all_signals if not s["confirmed"]]
+    watch_parts = []
+    for s in watching:
+        conf_dir = "green" if s["type"] == "CALL" else "red"
+        watch_parts.append(
+            f"{s['symbol']} {s['type']}: if next bar closes {conf_dir}, "
+            f"signal confirms near ${s['level']:.2f}"
+        )
+    trend_parts = []
+    for sr in scan_results:
+        if "error" not in sr and sr["trend"] == "sideways":
+            top_sup = sr["top_support"][:1]
+            top_res = sr["top_resistance"][:1]
+            if top_sup and top_res:
+                trend_parts.append(
+                    f"{sr['symbol']} (sideways — watch ${top_sup[0]:.2f} support "
+                    f"/ ${top_res[0]:.2f} resistance)"
+                )
+    lines3 = []
+    if watch_parts:
+        lines3.append("Unconfirmed signals to monitor: " + " · ".join(watch_parts) + ".")
+    if trend_parts:
+        lines3.append("Sideways symbols — wait for trend to resolve: "
+                      + ", ".join(trend_parts[:3]) + ".")
+    lines3.append(
+        "SPY and QQQ trend direction at the open sets the session bias. "
+        "Calls only in uptrend, puts only in downtrend, sit out sideways."
+    )
+    q3 = " ".join(lines3)
+
+    return {"q1": q1, "q2": q2, "q3": q3}
 
 
 # ── HTML helpers ───────────────────────────────────────────────────────────────
 
-TABLE_OPEN  = ('<table style="width:100%;border-collapse:collapse;background:#111;'
-               'border-radius:6px;overflow:hidden;margin-bottom:24px">')
-TABLE_CLOSE = "</table>"
+_FONT = ("'IBM Plex Mono', 'Courier New', Courier, monospace")
 
-def _h2(title: str) -> str:
-    return (f'<h2 style="color:#00aaff;border-bottom:1px solid #1e3a5a;'
-            f'padding-bottom:8px;margin-top:40px;font-size:17px">{title}</h2>')
+def _s(rules: dict) -> str:
+    """Dict to inline style string."""
+    return ";".join(f"{k}:{v}" for k, v in rules.items())
 
 
-def _h3(title: str) -> str:
-    return (f'<h3 style="color:#88bbee;font-size:12px;text-transform:uppercase;'
-            f'letter-spacing:1px;margin-top:24px;margin-bottom:8px">{title}</h3>')
+def _card(content: str, extra_style: str = "") -> str:
+    style = (f"background:{CARD};border:1px solid {BORDER};"
+             f"border-radius:6px;padding:20px 24px;"
+             f"margin-bottom:20px;{extra_style}")
+    return f'<div style="{style}">{content}</div>'
 
 
-def _th(val: str) -> str:
-    return (f'<th style="padding:8px 12px;text-align:left;color:#555;font-size:11px;'
-            f'text-transform:uppercase;background:#0a0a0a">{val}</th>')
+def _section_label(text: str) -> str:
+    style = (f"color:{GREEN};font-size:10px;letter-spacing:2px;"
+             f"text-transform:uppercase;margin:0 0 14px;padding:0;"
+             f"font-family:{_FONT}")
+    return f'<p style="{style}">{text}</p>'
 
 
-def _td(val, color: str = "") -> str:
-    style = "padding:8px 12px;border-bottom:1px solid #1a1a1a"
-    if color:
-        style += f";color:{color}"
-    return f'<td style="{style}">{val}</td>'
+def _table(headers: list, rows: list) -> str:
+    th_style = (f"color:{DIM};font-size:11px;letter-spacing:1px;"
+                f"text-transform:uppercase;padding:8px 12px;"
+                f"border-bottom:1px solid {BORDER};text-align:left;"
+                f"font-family:{_FONT};font-weight:400")
+    td_style  = (f"padding:8px 12px;border-bottom:1px solid {BORDER};"
+                 f"font-size:13px;color:{TEXT};font-family:{_FONT};vertical-align:top")
+    last_td   = (f"padding:8px 12px;font-size:13px;color:{TEXT};"
+                 f"font-family:{_FONT};vertical-align:top")
+    table_s   = ("width:100%;border-collapse:collapse;"
+                 f"background:{CARD};border-radius:4px;overflow:hidden")
+
+    head = "".join(f'<th style="{th_style}">{h}</th>' for h in headers)
+    body = ""
+    for row in rows:
+        cells = ""
+        for i, cell in enumerate(row):
+            s = last_td if i == len(row) - 1 else td_style
+            cells += f'<td style="{s}">{cell}</td>'
+        body += f"<tr>{cells}</tr>"
+    return (f'<table style="{table_s}">'
+            f"<thead><tr>{head}</tr></thead>"
+            f"<tbody>{body}</tbody></table>")
 
 
-def _check(cond: bool) -> str:
-    if cond:
-        return '<span style="color:#00cc55;font-weight:bold">✓</span>'
-    return '<span style="color:#dd3300;font-weight:bold">✗</span>'
+def _val(text, color: str = WHITE) -> str:
+    return f'<span style="color:{color};font-weight:500">{text}</span>'
 
 
-def _trend_badge(trend: str) -> str:
+def _dim(text: str) -> str:
+    return f'<span style="color:{DIM}">{text}</span>'
+
+
+def _trend_label(trend: str) -> str:
     cfg = {
-        "uptrend":   ("#00cc55", "▲ UPTREND"),
-        "downtrend": ("#dd3300", "▼ DOWNTREND"),
-        "sideways":  ("#888800", "↔ SIDEWAYS"),
+        "uptrend":   (GREEN,  "▲ UPTREND"),
+        "downtrend": (RED,    "▼ DOWNTREND"),
+        "sideways":  (YELLOW, "↔ SIDEWAYS"),
     }
-    color, label = cfg.get(trend, ("#888", trend.upper()))
-    return f'<span style="color:{color};font-weight:bold">{label}</span>'
+    color, label = cfg.get(trend, (DIM, trend.upper()))
+    return f'<span style="color:{color};font-weight:500">{label}</span>'
 
 
 def _pct_color(pct: float) -> str:
-    if pct >= 90:  return "#00dd55"
-    if pct >= 50:  return "#88cc00"
-    if pct >= 0:   return "#cccc00"
-    return "#dd3300"
+    if pct >= 90:  return GREEN
+    if pct >= 50:  return "#88ff44"
+    if pct >= 0:   return YELLOW
+    return RED
 
 
-def _thead(*headers) -> str:
-    return f"<thead><tr>{''.join(_th(h) for h in headers)}</tr></thead>"
-
-
-# ── HTML builder ───────────────────────────────────────────────────────────────
+# ── HTML email builder ─────────────────────────────────────────────────────────
 
 def build_html(today: str, positions: list, account: dict,
-               scan_results: list, orders: list, lessons: list) -> str:
+               scan_results: list, orders: list,
+               cardona_positions: dict, lessons: list) -> str:
 
-    ts             = datetime.now().strftime("%Y-%m-%d %H:%M ET")
-    equity         = account.get("equity")
-    cash           = account.get("cash")
-    cardona_syms   = load_cardona_position_syms()
-    opts           = [p for p in positions
-                      if OPTION_RE.match(p["symbol"]) and p["symbol"] in cardona_syms]
+    ts           = datetime.now().strftime("%I:%M %p ET").lstrip("0")
+    today_label  = date.today().strftime("%A, %B %-d, %Y")
+    equity       = account.get("equity")
+    cash         = account.get("cash")
+    equity_f     = float(equity) if equity else 0.0
+    cash_f       = float(cash)   if cash   else 0.0
+    last_equity  = float(account.get("last_equity", equity_f))
+    day_pl       = equity_f - last_equity
+    day_pl_pct   = (day_pl / last_equity * 100) if last_equity else 0.0
 
-    # Collect all signals with their symbol
+    # Cardona-scoped options positions from Alpaca
+    cardona_syms = set(cardona_positions.keys())
+    opts = [p for p in positions
+            if OPTION_RE.match(p["symbol"]) and p["symbol"] in cardona_syms]
+
+    # Signals
     all_signals: list = []
     for sr in scan_results:
         for s in sr.get("signals", []):
@@ -414,200 +554,184 @@ def build_html(today: str, positions: list, account: dict,
             s["trend"]  = sr.get("trend", "sideways")
             all_signals.append(s)
 
-    confirmed_sigs  = [s for s in all_signals if s["confirmed"]]
-    option_orders   = [o for o in orders if OPTION_RE.match(o.get("symbol", ""))]
-    filled_orders   = [o for o in option_orders if o.get("status") == "filled"]
+    # Cardona trades placed today (entries with entry_date == today)
+    trades_today = {sym: meta for sym, meta in cardona_positions.items()
+                    if meta.get("entry_date") == today}
 
-    # ── Page header ────────────────────────────────────────────────────────────
-    html = f"""<!DOCTYPE html>
-<html>
-<body style="background:#0d0d0d;color:#e0e0e0;font-family:monospace,monospace;
-             padding:24px;margin:0">
-<div style="max-width:860px;margin:0 auto">
+    # Self-evaluation
+    self_eval = _generate_self_eval(scan_results, cardona_positions, today)
 
-<h1 style="color:#ffffff;margin-bottom:4px;font-size:24px;letter-spacing:-0.5px">
-  Options Journal &nbsp;—&nbsp; {today}
-</h1>
-<p style="color:#444;font-size:12px;margin-top:0">
-  Generated {ts} &nbsp;·&nbsp; Cardona Strategy Bot &nbsp;·&nbsp; Paper Trading
-</p>
-<hr style="border:none;border-top:2px solid #1a2a3a;margin:16px 0 28px">
+    # Cycle data
+    cycle = read_cycles_summary()
+    trades_remaining = max(0, 10 - cycle["trades"])
 
-"""
+    # ── Day P&L color
+    pl_color = GREEN if day_pl >= 0 else RED
+    pl_sign  = "+" if day_pl >= 0 else ""
 
-    # ── Session Summary ────────────────────────────────────────────────────────
-    html += _h2("Session Summary")
-    equity_str = f"${float(equity):,.2f}" if equity else "N/A"
-    html += TABLE_OPEN + _thead("Metric", "Value") + "<tbody>"
-    for label, val in [
-        ("Symbols scanned",       len([r for r in scan_results if "error" not in r])),
-        ("Signals detected",      len(all_signals)),
-        ("Confirmed signals",     len(confirmed_sigs)),
-        ("Auto-trades fired",     len(filled_orders)),
-        ("Positions open",        len(opts)),
-        ("Auto-trade slots free", f"{max(0, 2 - len(opts))} / 2"),
-        ("Account equity",        equity_str),
-    ]:
-        html += f"<tr>{_td(label, '#888')}{_td(f'<b>{val}</b>')}</tr>"
-    html += f"</tbody>{TABLE_CLOSE}"
+    # ── base body style
+    body_style = (f"background:{BG};margin:0;padding:0;"
+                  f"font-family:{_FONT};color:{TEXT};-webkit-font-smoothing:antialiased")
 
-    # ── Watchlist Scan ─────────────────────────────────────────────────────────
-    html += _h2("Watchlist Scan — EOD State")
-    html += TABLE_OPEN + _thead("Symbol", "Price", "Trend", "Top Support", "Top Resistance", "Signal") + "<tbody>"
+    # ── wrapper
+    wrap_style = "max-width:680px;margin:0 auto;padding:24px 16px"
+
+    html_parts = [f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<title>Cardona Bot Journal</title>
+</head>
+<body style="{body_style}">
+<div style="{wrap_style}">"""]
+
+    # ── HEADER ────────────────────────────────────────────────────────────────
+    header_style = (f"border-bottom:2px solid {BORDER};padding-bottom:20px;"
+                    "margin-bottom:24px")
+    badge_style  = (f"display:inline-block;background:{GREEN};color:#000;"
+                    "font-size:9px;letter-spacing:2px;text-transform:uppercase;"
+                    "padding:3px 8px;border-radius:3px;margin-bottom:10px;"
+                    f"font-family:{_FONT};font-weight:600")
+    title_style  = (f"color:{WHITE};font-size:24px;font-weight:600;"
+                    f"margin:0 0 4px;font-family:{_FONT}")
+    sub_style    = (f"color:{DIM};font-size:12px;margin:0;"
+                    f"font-family:{_FONT}")
+
+    equity_str = f"${equity_f:,.2f}" if equity else "N/A"
+    pl_str     = f"{pl_sign}${abs(day_pl):,.2f} ({pl_sign}{day_pl_pct:.2f}%)"
+
+    html_parts.append(f"""
+<div style="{header_style}">
+  <div style="{badge_style}">PAPER TRADING</div>
+  <h1 style="{title_style}">Cardona Bot Journal</h1>
+  <p style="{sub_style}">{today_label} &nbsp;·&nbsp; Generated {ts}</p>
+</div>""")
+
+    # ── STAT STRIP (equity / cash / day P&L / slots) ──────────────────────────
+    stat_cell = (f"background:{CARD};border:1px solid {BORDER};border-radius:6px;"
+                 "padding:14px 18px;text-align:center;width:25%")
+    stat_label = (f"color:{DIM};font-size:9px;letter-spacing:2px;"
+                  f"text-transform:uppercase;margin:0 0 6px;font-family:{_FONT}")
+    stat_val   = (f"color:{WHITE};font-size:16px;font-weight:600;"
+                  f"margin:0;font-family:{_FONT}")
+    n_slots = max(0, 2 - len(opts))
+
+    html_parts.append(f"""
+<table style="width:100%;border-collapse:collapse;margin-bottom:24px">
+<tr>
+  <td style="{stat_cell}">
+    <p style="{stat_label}">Equity</p>
+    <p style="{stat_val}">{equity_str}</p>
+  </td>
+  <td style="width:8px"></td>
+  <td style="{stat_cell}">
+    <p style="{stat_label}">Cash</p>
+    <p style="{stat_val}">${cash_f:,.0f}</p>
+  </td>
+  <td style="width:8px"></td>
+  <td style="{stat_cell}">
+    <p style="{stat_label}">Day P&amp;L</p>
+    <p style="{stat_val};color:{pl_color}">{pl_str}</p>
+  </td>
+  <td style="width:8px"></td>
+  <td style="{stat_cell}">
+    <p style="{stat_label}">Slots Free</p>
+    <p style="{stat_val};color:{GREEN if n_slots > 0 else RED}">{n_slots} / 2</p>
+  </td>
+</tr>
+</table>""")
+
+    # ── SECTION 1: Account Snapshot ────────────────────────────────────────────
+    acc_rows = [
+        ("Portfolio Value",    _val(equity_str)),
+        ("Cash Available",     _val(f"${cash_f:,.2f}")),
+        ("Cardona Positions",  _val(f"{len(opts)} open")),
+        ("Auto-Trade Slots",   _val(f"{n_slots} / 2 free",
+                                    GREEN if n_slots > 0 else YELLOW)),
+        ("Day P&amp;L",        _val(pl_str, pl_color)),
+        ("Paper Account",      _dim("Alpaca paper trading — not real money")),
+    ]
+    content = _section_label("01 — Account Snapshot")
+    content += _table(["Field", "Value"], acc_rows)
+    html_parts.append(_card(content))
+
+    # ── SECTION 2: Signals Today ───────────────────────────────────────────────
+    sig_rows = []
     for sr in scan_results:
         if "error" in sr:
-            no_data = '<span style="color:#555">no data</span>'
-            html += (f"<tr>{_td('<b>' + sr['symbol'] + '</b>')}"
-                     f"{_td('—')}{_td('ERROR')}{_td('—')}{_td('—')}"
-                     f"{_td(no_data)}</tr>")
+            sig_rows.append([_val(sr["symbol"]), _dim("—"), _dim("error"), _dim("no data")])
             continue
-        top_sup = " / ".join(f"${s:.2f}" for s in sr["top_support"]) or "—"
-        top_res = " / ".join(f"${r:.2f}" for r in sr["top_resistance"]) or "—"
-        sigs    = sr["signals"]
+        sigs  = sr["signals"]
+        trend = _trend_label(sr["trend"])
         if not sigs:
-            sig_html = '<span style="color:#444">No signal</span>'
+            sig_rows.append([_val(sr["symbol"]),
+                              f'<span style="color:{DIM};font-size:12px">'
+                              f'${sr["price"]:.2f}</span>',
+                              trend,
+                              _dim("—"), _dim("No signal")])
         else:
-            parts = []
             for s in sigs:
-                col  = "#00cc55" if s["confirmed"] else "#888800"
-                stat = "CONFIRMED" if s["confirmed"] else "watching"
-                parts.append(f'<span style="color:{col}">{s["type"]} {stat}</span>')
-            sig_html = " &nbsp;/&nbsp; ".join(parts)
-        sym_bold  = f"<b>{sr['symbol']}</b>"
-        price_str = f"${sr['price']:.2f}"
-        html += (f"<tr>"
-                 + _td(sym_bold)
-                 + _td(price_str)
-                 + _td(_trend_badge(sr["trend"]))
-                 + _td(top_sup, "#88cc88")
-                 + _td(top_res, "#cc8888")
-                 + _td(sig_html)
-                 + "</tr>")
-    html += f"</tbody>{TABLE_CLOSE}"
+                stat_color = GREEN if s["confirmed"] else YELLOW
+                status     = "CONFIRMED" if s["confirmed"] else "Watching"
+                sig_rows.append([
+                    _val(sr["symbol"]),
+                    f'<span style="color:{DIM};font-size:12px">'
+                    f'${sr["price"]:.2f}</span>',
+                    trend,
+                    _val(f'{s["type"]} — {s["pattern"]}',
+                         GREEN if s["type"] == "CALL" else RED),
+                    f'<span style="color:{stat_color};font-weight:500">'
+                    f'{status}</span>',
+                ])
 
-    # ── Signals Detected ───────────────────────────────────────────────────────
-    html += _h2(f"Signals Detected ({len(all_signals)})")
+    content  = _section_label("02 — Signals Today")
+    content += f'<p style="color:{DIM};font-size:11px;margin:0 0 12px">10 symbols scanned on 1-hour bars</p>'
+    content += _table(["Symbol", "Price", "Trend", "Signal", "Status"], sig_rows)
+    html_parts.append(_card(content))
 
-    if not all_signals:
-        html += '<p style="color:#555;margin-bottom:24px">No hammer or hanging man signals in any symbol today.</p>'
+    # ── SECTION 3: Trades Placed ───────────────────────────────────────────────
+    content = _section_label("03 — Trades Placed")
+    if not trades_today:
+        content += f'<p style="color:{DIM};font-size:13px;margin:0">No Cardona entries today.</p>'
     else:
-        for s in all_signals:
-            sym       = s["symbol"]
-            sig_type  = s["type"]
-            pattern   = s["pattern"]
-            trend     = s["trend"]
-            n_opts    = len(opts)
+        trade_rows = []
+        for occ_sym, meta in trades_today.items():
+            parsed = _parse_occ(occ_sym)
+            under  = parsed.get("underlying", occ_sym)
+            typ    = parsed.get("type", "?")
+            strike = f'${parsed.get("strike", 0):.0f}' if parsed else "?"
+            exp    = meta.get("expiry", "?")
+            entry_est = meta.get("entry_price_estimate", 0)
+            cost_est  = entry_est * 100 if entry_est else 0
+            trade_rows.append([
+                _val(under),
+                _val(typ, GREEN if typ == "CALL" else RED),
+                _val(strike),
+                _val(exp),
+                _val(f"${entry_est:.2f}" if entry_est else "?"),
+                _val(f"${cost_est:.0f}" if cost_est else "?"),
+            ])
+        content += _table(
+            ["Symbol", "Direction", "Strike", "Expiry", "Premium", "Cost"],
+            trade_rows,
+        )
+    html_parts.append(_card(content))
 
-            trend_ok = (sig_type == "CALL" and trend == "uptrend") or \
-                       (sig_type == "PUT"  and trend == "downtrend")
-            slot_ok  = n_opts < 2
-            conf_ok  = s["confirmed"]
-            level    = s["level"]
-            conf_price = s["conf_close"]
-
-            if sig_type == "CALL":
-                drift = (conf_price - level) / level
-            else:
-                drift = (level - conf_price) / level
-            chase_ok = drift <= PROXIMITY
-
-            strike = _suggested_strike(sym, s["close"], sig_type.lower())
-
-            if conf_ok and trend_ok and slot_ok and chase_ok:
-                result_color = "#00cc55"
-                result_text  = "FIRED — AUTO-TRADE EXECUTED"
-            elif not conf_ok:
-                result_color = "#888800"
-                result_text  = "WATCHING — no confirmation candle yet"
-            elif not trend_ok:
-                need = "UPTREND" if sig_type == "CALL" else "DOWNTREND"
-                result_color = "#dd3300"
-                result_text  = f"BLOCKED — trend is {trend.upper()}, {sig_type} requires {need}"
-            elif not slot_ok:
-                result_color = "#dd3300"
-                result_text  = "BLOCKED — position limit reached (2/2)"
-            elif not chase_ok:
-                result_color = "#dd3300"
-                result_text  = (f"BLOCKED — price drifted {drift * 100:.2f}% past level "
-                                f"(max {PROXIMITY * 100:.1f}%)")
-            else:
-                result_color = "#888800"
-                result_text  = "WATCHING"
-
-            border_color = "#00cc55" if "FIRED" in result_text else \
-                           ("#dd3300" if "BLOCKED" in result_text else "#888800")
-            html += (f'<div style="background:#111;border-left:3px solid {border_color};'
-                     f'padding:16px;border-radius:4px;margin-bottom:16px">')
-            html += (f'<p style="margin:0 0 4px;font-size:15px;font-weight:bold;color:#cde">'
-                     f'{sym} — {sig_type} Signal ({pattern} at ${level:.2f} {s["level_tag"]})</p>')
-            html += (f'<p style="margin:0 0 12px;color:#555;font-size:11px">'
-                     f'Pattern bar: {s["time"][:16]} &nbsp;·&nbsp; '
-                     f'Confirmation bar: {s["conf_time"][:16]} &nbsp;·&nbsp; '
-                     f'Suggested strike: ${strike:.0f}</p>')
-
-            need_trend = "UPTREND" if sig_type == "CALL" else "DOWNTREND"
-            dir_ok_str = f"Trend aligned — {sig_type} needs {need_trend} (got {trend.upper()})"
-            slot_str   = f"Position slot available ({n_opts}/2 open)"
-            chase_str  = f"No-chase: within 0.5% of level (drift {drift * 100:.2f}%)"
-            conf_dir   = "green" if sig_type == "CALL" else "red"
-
-            html += TABLE_OPEN + _thead("Rule", "Result") + "<tbody>"
-            for rule_text, cond in [
-                (dir_ok_str,                              trend_ok),
-                (slot_str,                                slot_ok),
-                (f"S/R level identified (${level:.2f} {s['level_tag']})", True),
-                (f"{pattern} pattern at level",           True),
-                (f"Confirmation candle ({conf_dir})",     conf_ok),
-                (chase_str,                               chase_ok),
-            ]:
-                html += f"<tr>{_td(rule_text)}{_td(_check(cond))}</tr>"
-
-            html += (f'<tr><td colspan="2" style="padding:10px 12px;font-weight:bold;'
-                     f'color:{result_color};border-top:1px solid #2a2a2a">'
-                     f'{result_text}</td></tr>')
-            html += f"</tbody>{TABLE_CLOSE}"
-            html += "</div>"
-
-    # ── Auto-Trade Log ─────────────────────────────────────────────────────────
-    html += _h2("Auto-Trade Log")
-    if not option_orders:
-        html += '<p style="color:#555;margin-bottom:24px">No option orders placed today.</p>'
-    else:
-        html += TABLE_OPEN + _thead("Time (UTC)", "Symbol", "Side", "Qty", "Type", "Status", "Fill") + "<tbody>"
-        for o in option_orders:
-            t      = o.get("submitted_at", "")[:16]
-            sym    = o.get("symbol", "")
-            parsed = _parse_occ(sym)
-            desc   = (f"{parsed['underlying']} ${parsed['strike']:.0f} {parsed['type']}"
-                      if parsed else sym)
-            side   = o.get("side", "").upper()
-            qty    = o.get("qty", "1")
-            otype  = o.get("order_type", "market").upper()
-            status = o.get("status", "").upper()
-            fill   = o.get("filled_avg_price")
-            fill_s = f"${float(fill):.2f}" if fill else "—"
-            scol   = ("#00cc55" if status == "FILLED"
-                      else "#dd3300" if status in ("CANCELED", "REJECTED")
-                      else "#888")
-            status_cell = _td(f'<span style="color:{scol}">{status}</span>')
-            html += ("<tr>"
-                     + _td(t, "#666")
-                     + _td(f"<b>{desc}</b>")
-                     + _td(side)
-                     + _td(qty)
-                     + _td(otype)
-                     + status_cell
-                     + _td(fill_s)
-                     + "</tr>")
-        html += f"</tbody>{TABLE_CLOSE}"
-
-    # ── Open Positions ─────────────────────────────────────────────────────────
-    html += _h2(f"Open Positions ({len(opts)})")
+    # ── SECTION 4: Open Positions ─────────────────────────────────────────────
+    content = _section_label("04 — Open Positions")
     if not opts:
-        html += '<p style="color:#555;margin-bottom:24px">No open options positions.</p>'
+        n_cardona = len(cardona_positions)
+        if n_cardona == 0:
+            content += f'<p style="color:{DIM};font-size:13px;margin:0">No open Cardona positions. 2 slots available.</p>'
+        else:
+            content += (f'<p style="color:{YELLOW};font-size:13px;margin:0">'
+                        f'{n_cardona} position(s) in registry but not found on Alpaca '
+                        f'(may be closed or pending fill).</p>')
     else:
-        html += TABLE_OPEN + _thead("Underlying", "Type", "Strike", "Expiry", "DTE",
-                                     "Entry", "Current", "P&amp;L", "Status") + "<tbody>"
+        pos_rows = []
         for pos in opts:
             sym    = pos["symbol"]
             pct    = float(pos.get("unrealized_plpc", 0)) * 100
@@ -616,213 +740,194 @@ def build_html(today: str, positions: list, account: dict,
             cur    = float(pos.get("current_price", 0))
             parsed = _parse_occ(sym)
             under  = parsed.get("underlying", sym)
-            strike = f"${parsed['strike']:.0f}" if parsed else "—"
-            exp    = parsed.get("expiration", "—")
+            typ    = parsed.get("type", "?")
+            exp    = parsed.get("expiration", "?")
             dte    = _dte(exp)
-            otype  = parsed.get("type", "—")
-
-            pct_c = _pct_color(pct)
+            pctc   = _pct_color(pct)
             if pct >= TP_THRESHOLD * 100:
-                status_s = '<span style="color:#00dd55;font-weight:bold">★ TAKE PROFIT</span>'
+                stat = f'<span style="color:{GREEN};font-weight:600">★ TAKE PROFIT</span>'
             elif dte <= 2:
-                status_s = '<span style="color:#dd8800;font-weight:bold">⚠ EXPIRY SOON</span>'
-            elif pct >= 80:
-                status_s = '<span style="color:#88cc00">Watch closely</span>'
+                stat = f'<span style="color:{YELLOW};font-weight:600">⚠ EXPIRY SOON</span>'
             else:
-                status_s = '<span style="color:#555">Holding</span>'
-
-            dte_color = "#dd8800" if dte <= 2 else "#888"
-            pl_cell   = _td(f'<span style="color:{pct_c};font-weight:bold">{pct:+.1f}% (${pl_d:+.0f})</span>')
-            html += ("<tr>"
-                     + _td(f"<b>{under}</b>")
-                     + _td(otype)
-                     + _td(strike)
-                     + _td(exp, "#888")
-                     + _td(dte, dte_color)
-                     + _td(f"${entry:.2f}")
-                     + _td(f"${cur:.2f}")
-                     + pl_cell
-                     + _td(status_s)
-                     + "</tr>")
-        html += f"</tbody>{TABLE_CLOSE}"
-
-    # ── End of Day Snapshot ────────────────────────────────────────────────────
-    html += _h2("End of Day Snapshot")
-    equity_val = float(equity) if equity else 0
-    cash_val   = float(cash)   if cash   else 0
-    unrl_pl    = sum(float(p.get("unrealized_pl", 0)) for p in opts)
-
-    html += TABLE_OPEN + _thead("Metric", "Value") + "<tbody>"
-    for label, val in [
-        ("Account equity",           f"${equity_val:,.2f}" if equity else "N/A"),
-        ("Cash available",           f"${cash_val:,.2f}"   if cash   else "N/A"),
-        ("Open options positions",   len(opts)),
-        ("Unrealized P&L (options)", f'<span style="color:{_pct_color(unrl_pl)}">'
-                                     f'${unrl_pl:+,.2f}</span>'),
-        ("Signals seen today",       len(all_signals)),
-        ("Confirmed signals",        len(confirmed_sigs)),
-        ("Auto-trades fired",        len(filled_orders)),
-        ("Option orders total",      len(option_orders)),
-    ]:
-        html += f"<tr>{_td(label, '#888')}{_td(val)}</tr>"
-    html += f"</tbody>{TABLE_CLOSE}"
-
-    # ── EOD Reflection ─────────────────────────────────────────────────────────
-    html += _h2("End of Day Reflection")
-
-    # Active rules
-    html += _h3("Strategy Rules")
-    html += TABLE_OPEN + _thead("Rule", "Status") + "<tbody>"
-    for rule in [
-        "1-hour candles only — no other timeframe",
-        "Max 2 options positions open at any time",
-        "Max $200 per trade — enforced at order time",
-        "No trades after 3:30 PM ET",
-        "No trade when trend is SIDEWAYS",
-        "No-chase: skip if confirmation close >0.5% past S/R level",
-        "Exit at 90%+ gain — auto_monitor() closes automatically",
-        "Stop loss: none — let options expire (intentional)",
-    ]:
-        html += f"<tr>{_td(rule)}{_td(_check(True))}</tr>"
-    html += f"</tbody>{TABLE_CLOSE}"
-
-    # Lessons
-    html += _h3("Recent Lessons")
-    if lessons:
-        items = "".join(
-            f'<li style="margin:6px 0;color:#bbb;line-height:1.5">{ln}</li>'
-            for ln in lessons
+                stat = f'<span style="color:{DIM}">Holding</span>'
+            pos_rows.append([
+                _val(f"{under} {typ}"),
+                _val(f'${parsed.get("strike", 0):.0f}') if parsed else _dim("?"),
+                _val(exp),
+                f'<span style="color:{YELLOW if dte <= 2 else DIM}">{dte}d</span>',
+                _val(f"${entry:.2f}"),
+                _val(f"${cur:.2f}"),
+                f'<span style="color:{pctc};font-weight:600">{pct:+.1f}% (${pl_d:+.0f})</span>',
+                stat,
+            ])
+        content += _table(
+            ["Contract", "Strike", "Expiry", "DTE", "Entry", "Current", "P&amp;L", "Status"],
+            pos_rows,
         )
-        html += f'<ul style="padding-left:20px;margin-bottom:24px">{items}</ul>'
-    else:
-        html += ('<p style="color:#555;margin-bottom:24px">'
-                 'No lessons recorded yet. Write one after each closed trade.</p>')
+    html_parts.append(_card(content))
 
-    # Cycle status
-    html += _h3("Cycle Tracking")
-    html += (f'<p style="color:#888;margin-bottom:8px">'
-             f'Cycle 1 in progress. Target: 6–7 wins per 10 trades. '
-             f'A win = option closed at 100%+ gain. A loss = expired worthless.</p>')
+    # ── SECTION 5: Cycle Tracking ──────────────────────────────────────────────
+    cycle_rows = [
+        ("Current cycle",    _val(f"Cycle {cycle['cycle']}")),
+        ("Trades completed", _val(f"{cycle['trades']} / 10")),
+        ("Wins / Losses",    _val(f"{cycle['wins']}W / {cycle['losses']}L")),
+        ("Trades remaining", _val(str(trades_remaining))),
+        ("Target",           _dim("6 – 7 wins per 10 trades")),
+        ("Exit rule",        _dim("Close at 100%+ gain · let losers expire")),
+    ]
+    content  = _section_label("05 — Cycle Tracking")
+    content += _table(["Metric", "Value"], cycle_rows)
 
-    # Human action required
-    tp_list = [p for p in opts if float(p.get("unrealized_plpc", 0)) >= TP_THRESHOLD]
-    exp_warn = [p for p in opts if _dte(_parse_occ(p["symbol"]).get("expiration", "9999-12-31")) <= 2]
+    # Progress bar
+    filled   = min(cycle["trades"], 10)
+    bar_html = ""
+    for i in range(10):
+        if i < filled:
+            color = GREEN if i < cycle["wins"] else RED
+        else:
+            color = BORDER
+        bar_html += (f'<span style="display:inline-block;width:44px;height:10px;'
+                     f'background:{color};border-radius:2px;margin-right:4px"></span>')
+    content += (f'<div style="margin-top:14px">'
+                f'<p style="color:{DIM};font-size:10px;letter-spacing:1px;'
+                f'text-transform:uppercase;margin:0 0 8px">Trade progress</p>'
+                f'{bar_html}</div>')
+    html_parts.append(_card(content))
 
-    html += _h3("Human Action Required")
-    if tp_list or exp_warn:
-        html += '<div style="background:#1a0a0a;border:1px solid #dd3300;border-radius:4px;padding:14px;margin-bottom:24px">'
-        if tp_list:
-            syms = ", ".join(
-                (_parse_occ(p["symbol"]).get("underlying") or p["symbol"])
-                for p in tp_list
-            )
-            html += (f'<p style="color:#dd3300;font-weight:bold;margin:0 0 8px">'
-                     f'★ TAKE PROFIT — {syms} at 90%+ but still open.<br>'
-                     f'Run: <code>python3 scripts/cardona_trade.py monitor</code></p>')
-        if exp_warn:
-            syms = ", ".join(
-                (_parse_occ(p["symbol"]).get("underlying") or p["symbol"])
-                for p in exp_warn
-            )
-            html += (f'<p style="color:#dd8800;font-weight:bold;margin:0">'
-                     f'⚠ EXPIRY WARNING — {syms} expire within 2 trading days. '
-                     f'Review and decide whether to close manually.</p>')
-        html += '</div>'
-    else:
-        html += ('<p style="color:#00cc55;margin-bottom:24px">'
-                 'NONE — the bot is handling everything autonomously.</p>')
+    # ── SECTION 6: Self Evaluation ─────────────────────────────────────────────
+    q_label = (f"color:{GREEN};font-size:11px;letter-spacing:1px;"
+               f"text-transform:uppercase;margin:0 0 6px;font-family:{_FONT}")
+    a_style = (f"color:{TEXT};font-size:13px;line-height:1.6;"
+               f"margin:0 0 18px;font-family:{_FONT}")
 
-    html += """
-<hr style="border:none;border-top:1px solid #1a1a1a;margin-top:36px">
-<p style="color:#333;font-size:11px;margin-bottom:0">
-  Cardona Strategy Bot &nbsp;·&nbsp; Paper Trading Account &nbsp;·&nbsp; """ + today + """<br>
-  All positions are simulated. Not financial advice.
+    content = _section_label("06 — Self Evaluation")
+    for q_num, q_text, answer in [
+        ("Q1", "What signals were seen today?",         self_eval["q1"]),
+        ("Q2", "Were any signals missed and why?",      self_eval["q2"]),
+        ("Q3", "What to watch tomorrow?",               self_eval["q3"]),
+    ]:
+        content += (f'<p style="{q_label}">{q_num} — {q_text}</p>'
+                    f'<p style="{a_style}">{answer}</p>')
+
+    # Append recent lessons if any
+    if lessons:
+        content += (f'<p style="{q_label}">Recent lessons</p>')
+        for ln in lessons:
+            content += (f'<p style="color:{DIM};font-size:12px;'
+                        f'line-height:1.5;margin:0 0 6px;font-family:{_FONT}">'
+                        f'· {ln}</p>')
+    html_parts.append(_card(content))
+
+    # ── FOOTER ────────────────────────────────────────────────────────────────
+    footer_style = (f"color:{DIM};font-size:11px;text-align:center;"
+                    f"line-height:1.6;margin-top:12px;font-family:{_FONT}")
+    html_parts.append(f"""
+<p style="{footer_style}">
+  Cardona Strategy Bot &nbsp;·&nbsp; Paper trading account &nbsp;·&nbsp; {today}<br>
+  All positions are simulated. Not financial advice.<br>
+  <a href="mailto:{os.environ.get('NOTIFY_EMAIL','')}"
+     style="color:{DIM}">Unsubscribe</a>
 </p>
 </div>
 </body>
-</html>"""
+</html>""")
 
-    return html
+    return "\n".join(html_parts)
 
 
 # ── Plain text fallback ────────────────────────────────────────────────────────
 
-def build_text(today: str, positions: list, scan_results: list,
-               orders: list, lessons: list) -> str:
-    cardona_syms = load_cardona_position_syms()
+def build_text(today: str, positions: list, account: dict,
+               scan_results: list, cardona_positions: dict,
+               lessons: list) -> str:
+    equity  = account.get("equity")
+    cash    = account.get("cash")
+    equity_f = float(equity) if equity else 0.0
+    cash_f   = float(cash) if cash else 0.0
+    last_eq  = float(account.get("last_equity", equity_f))
+    day_pl   = equity_f - last_eq
+    pl_sign  = "+" if day_pl >= 0 else ""
+
+    cardona_syms = set(cardona_positions.keys())
     opts = [p for p in positions
             if OPTION_RE.match(p["symbol"]) and p["symbol"] in cardona_syms]
-    all_signals = []
-    for sr in scan_results:
-        for s in sr.get("signals", []):
-            s = dict(s)
-            s["symbol"] = sr["symbol"]
-            all_signals.append(s)
 
+    today_label = date.today().strftime("%A, %B %-d, %Y")
     lines = [
-        f"CARDONA STRATEGY BOT — OPTIONS JOURNAL — {today}",
+        f"CARDONA BOT JOURNAL — {today_label}",
         "=" * 62, "",
+        f"Equity: ${equity_f:,.2f}  |  Cash: ${cash_f:,.2f}  |  "
+        f"Day P&L: {pl_sign}${abs(day_pl):,.2f}", "",
     ]
 
-    lines += [f"WATCHLIST SCAN ({len(scan_results)} symbols)"]
+    # Signals
+    lines += ["SIGNALS TODAY (10 symbols scanned)", ""]
     arrows = {"uptrend": "▲", "downtrend": "▼", "sideways": "↔"}
     for sr in scan_results:
         if "error" in sr:
             lines.append(f"  {sr['symbol']:6}  ERROR")
             continue
         arrow   = arrows.get(sr["trend"], "?")
-        sig_str = f"{len(sr['signals'])} signal(s)" if sr["signals"] else "no signals"
+        sigs    = sr["signals"]
+        sig_str = (", ".join(f"{s['type']} {'CONFIRMED' if s['confirmed'] else 'watching'}"
+                             for s in sigs)
+                   if sigs else "no signals")
         lines.append(f"  {sr['symbol']:6}  ${sr['price']:.2f}  "
                      f"{arrow} {sr['trend'].upper():<12}  {sig_str}")
 
-    lines += ["", f"SIGNALS ({len(all_signals)} detected)"]
-    for s in all_signals:
-        status = "CONFIRMED" if s["confirmed"] else "watching"
-        lines.append(f"  {s['symbol']} {s['type']} — {s['pattern']} — {status}")
-    if not all_signals:
+    # Trades placed
+    trades_today = {sym: meta for sym, meta in cardona_positions.items()
+                    if meta.get("entry_date") == today}
+    lines += ["", f"TRADES PLACED ({len(trades_today)})"]
+    for occ_sym, meta in trades_today.items():
+        parsed = _parse_occ(occ_sym)
+        under  = parsed.get("underlying", occ_sym)
+        typ    = parsed.get("type", "?")
+        strike = f'${parsed.get("strike", 0):.0f}' if parsed else "?"
+        exp    = meta.get("expiry", "?")
+        lines.append(f"  {under} {typ} {strike} exp {exp}")
+    if not trades_today:
         lines.append("  None")
 
-    option_orders = [o for o in orders if OPTION_RE.match(o.get("symbol", ""))]
-    filled = [o for o in option_orders if o.get("status") == "filled"]
-    lines += ["", f"AUTO-TRADES FIRED ({len(filled)})"]
-    for o in filled:
-        parsed = _parse_occ(o.get("symbol", ""))
-        desc   = (f"{parsed['underlying']} ${parsed['strike']:.0f} {parsed['type']}"
-                  if parsed else o.get("symbol", "?"))
-        fill   = o.get("filled_avg_price")
-        fill_s = f"${float(fill):.2f}" if fill else "pending"
-        lines.append(f"  {o.get('side','').upper()} {desc}  fill {fill_s}")
-    if not filled:
-        lines.append("  None")
-
+    # Open positions
     lines += ["", f"OPEN POSITIONS ({len(opts)})"]
     for pos in opts:
         sym    = pos["symbol"]
         pct    = float(pos.get("unrealized_plpc", 0)) * 100
         pl_d   = float(pos.get("unrealized_pl", 0))
         parsed = _parse_occ(sym)
-        desc   = (f"{parsed['underlying']} ${parsed['strike']:.0f} {parsed['type']} "
-                  f"exp {parsed['expiration']}" if parsed else sym)
-        tp = "  *** TAKE PROFIT ***" if pct >= TP_THRESHOLD * 100 else ""
-        lines.append(f"  {desc}  {pct:+.1f}% (${pl_d:+.0f}){tp}")
+        desc   = (f"{parsed['underlying']} ${parsed['strike']:.0f} "
+                  f"{parsed['type']} exp {parsed['expiration']}" if parsed else sym)
+        tp_tag = "  *** TAKE PROFIT ***" if pct >= TP_THRESHOLD * 100 else ""
+        lines.append(f"  {desc}  {pct:+.1f}% (${pl_d:+.0f}){tp_tag}")
     if not opts:
-        lines.append("  No open positions")
+        lines.append("  None (2 slots available)")
 
-    lines += ["", "RECENT LESSONS"]
-    for ln in lessons:
-        lines.append(f"  • {ln}")
-    if not lessons:
-        lines.append("  None yet — write one after each closed trade")
+    # Self eval
+    se = _generate_self_eval(scan_results, cardona_positions, today)
+    cycle = read_cycles_summary()
+    lines += ["", f"CYCLE {cycle['cycle']} — {cycle['trades']}/10 trades  "
+              f"({cycle['wins']}W / {cycle['losses']}L)"]
+    lines += ["", "SELF EVALUATION",
+              "", "Q1 — What signals were seen?", f"  {se['q1']}",
+              "", "Q2 — Were any signals missed?", f"  {se['q2']}",
+              "", "Q3 — What to watch tomorrow?", f"  {se['q3']}"]
 
-    lines += ["", "─" * 62, "Cardona Strategy Bot — Paper Trading"]
+    if lessons:
+        lines += ["", "RECENT LESSONS"]
+        for ln in lessons:
+            lines.append(f"  · {ln}")
+
+    lines += ["", "─" * 62,
+              "Cardona Strategy Bot — Paper Trading Account — Not financial advice"]
     return "\n".join(lines)
 
 
 # ── SendGrid delivery ──────────────────────────────────────────────────────────
 
 def send_email(subject: str, text_body: str, html_body: str) -> bool:
-    api_key  = os.environ.get("SENDGRID_API_KEY")
-    to_email = os.environ.get("NOTIFY_EMAIL")
+    api_key   = os.environ.get("SENDGRID_API_KEY")
+    to_email  = os.environ.get("NOTIFY_EMAIL")
 
     if not api_key:
         print("ERROR: SENDGRID_API_KEY not set in .env")
@@ -833,8 +938,13 @@ def send_email(subject: str, text_body: str, html_body: str) -> bool:
 
     payload = {
         "personalizations": [{"to": [{"email": to_email}]}],
-        "from":    {"email": to_email, "name": "Cardona Strategy Bot"},
+        "from":    {"email": to_email, "name": "Cardona Bot"},
+        "reply_to": {"email": to_email, "name": "Cardona Bot"},
         "subject": subject,
+        "headers": {
+            "List-Unsubscribe": f"<mailto:{to_email}?subject=unsubscribe>",
+            "X-Mailer": "Cardona Strategy Bot",
+        },
         "content": [
             {"type": "text/plain", "value": text_body},
             {"type": "text/html",  "value": html_body},
@@ -864,39 +974,46 @@ def main() -> None:
     today     = date.today().isoformat()
     test_mode = "--test" in sys.argv or "--dry-run" in sys.argv
 
+    # Format subject: "Cardona Bot Journal — May 19, 2026"
+    today_label = date.today().strftime("%B %-d, %Y")
+
     print(f"Cardona Notify — {today}")
 
     print("Fetching account data...", end="", flush=True)
-    positions = get_positions()
-    account   = get_account()
-    orders    = get_orders_today(today)
+    positions         = get_positions()
+    account           = get_account()
+    orders            = get_orders_today(today)
+    cardona_positions = load_cardona_positions()
     print(" done")
 
     print("Running EOD scan:")
     scan_results = scan_all()
 
-    lessons      = read_lessons()
-    cardona_syms = load_cardona_position_syms()
-    opts         = [p for p in positions
-                    if OPTION_RE.match(p["symbol"]) and p["symbol"] in cardona_syms]
-    all_sigs = []
-    for sr in scan_results:
-        for s in sr.get("signals", []):
-            s = dict(s)
-            s["symbol"] = sr["symbol"]
-            all_sigs.append(s)
+    lessons = read_lessons()
 
-    confirmed_cnt = sum(1 for s in all_sigs if s["confirmed"])
-    tp_cnt        = sum(1 for p in opts if float(p.get("unrealized_plpc", 0)) >= TP_THRESHOLD)
+    # Scoped opts for subject line
+    cardona_syms = set(cardona_positions.keys())
+    opts    = [p for p in positions
+               if OPTION_RE.match(p["symbol"]) and p["symbol"] in cardona_syms]
+    tp_cnt  = sum(1 for p in opts
+                  if float(p.get("unrealized_plpc", 0)) >= TP_THRESHOLD)
 
     tags = []
-    if tp_cnt:         tags.append(f"{tp_cnt} TAKE PROFIT")
-    if confirmed_cnt:  tags.append(f"{confirmed_cnt} signal(s)")
-    tag_str = " | " + " | ".join(tags) if tags else ""
-    subject = f"Cardona EOD {today} — {len(opts)} position(s) open{tag_str}"
+    if tp_cnt:
+        tags.append(f"{tp_cnt} TAKE PROFIT")
 
-    html_body = build_html(today, positions, account, scan_results, orders, lessons)
-    text_body = build_text(today, positions, scan_results, orders, lessons)
+    all_sigs   = [s for sr in scan_results for s in sr.get("signals", [])]
+    conf_cnt   = sum(1 for s in all_sigs if s.get("confirmed"))
+    if conf_cnt:
+        tags.append(f"{conf_cnt} signal" + ("s" if conf_cnt > 1 else ""))
+
+    tag_str = (" — " + " · ".join(tags)) if tags else ""
+    subject = f"Cardona Bot Journal — {today_label}{tag_str}"
+
+    html_body = build_html(today, positions, account, scan_results,
+                           orders, cardona_positions, lessons)
+    text_body = build_text(today, positions, account, scan_results,
+                           cardona_positions, lessons)
 
     if test_mode:
         print(f"\nSubject: {subject}")
