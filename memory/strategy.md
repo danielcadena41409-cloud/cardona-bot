@@ -6,7 +6,24 @@ _Read this file at the start of every session. It is the single source of truth 
 
 ## What This Bot Does
 
-Paper trades SPY and QQQ options using a pattern-recognition strategy on 1-hour candles. Entries are triggered by hammer or hanging man candles forming at key support or resistance levels, confirmed by the next candle closing in the expected direction. Losers are held to expiration. Winners are closed at 100% gain.
+**Fully autonomous paper trading bot.** It scans all 10 watchlist symbols every hour, detects hammer and hanging man patterns at key S/R levels, verifies trend alignment and confirmation, then places trades and closes winners automatically — no human approval required. The human role is limited to reviewing the EOD journal.
+
+---
+
+## AUTONOMOUS OPERATION
+
+The bot enforces these rules in code before every trade:
+
+| Rule | Detail |
+|------|--------|
+| Confirmed signal required | Pattern + confirmation candle + trend alignment — all three must be true |
+| No-chase rule | Skip if confirmation close is >0.5% past the S/R level |
+| Market hours only | No trades when market is closed or within 30 min of close (3:30 PM ET) |
+| No earnings trades | Skip if symbol has earnings today (requires calendar API) |
+| Max 2 positions | Checked before every entry — hard block if at limit |
+| Max $200 / trade | Verified via live ask price before order submission |
+| Auto-close at 90% | `auto_monitor()` runs hourly and closes positions at 90%+ gain |
+| No manual approval | Trades execute immediately when all conditions are met |
 
 ---
 

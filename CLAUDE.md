@@ -1,5 +1,25 @@
 # Cardona Strategy Bot — Rules & Configuration
 
+> **This bot is fully autonomous.** It scans, enters trades, monitors positions,
+> and closes take-profit targets without human approval. The human role is to
+> review the EOD journal and manage account-level risk only.
+
+---
+
+## AUTONOMOUS RULES
+
+These are hard limits enforced in code. The bot will not override them.
+
+1. **Maximum 2 open options positions at all times** — checked before every entry
+2. **Maximum $200 per trade** — ask price × 100 must be ≤ $200; skip if over
+3. **Only enter on confirmed signals** — requires: hammer/hanging man pattern + next candle confirmation + trend alignment (uptrend for calls, downtrend for puts)
+4. **Auto-close at 90% gain** — `auto_monitor()` fires every hour and closes positions at 90%+ without waiting for 100%
+5. **Never chase a signal** — if the confirmation candle's close has already moved more than 0.5% past the S/R level, skip the trade
+6. **No trades in the last 30 minutes of market hours** — hard cutoff at 3:30 PM ET, enforced via Alpaca clock `next_close`
+7. **No trades on earnings day** — `_is_earnings_day()` check before every auto-entry (requires earnings calendar API; currently a safe stub returning False)
+
+---
+
 ## INSTRUMENTS
 
 **Watchlist (10 symbols):** SPY, QQQ, TSLA, AAPL, NVDA, MSFT, AMZN, META, GOOGL, GLD

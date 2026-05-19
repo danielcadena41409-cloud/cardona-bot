@@ -5,7 +5,7 @@ import os
 import re
 import sys
 import requests
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -168,6 +168,27 @@ def _get_snapshot(opt_symbol: str) -> dict:
     return data.get("snapshots", {}).get(opt_symbol, {})
 
 
+# ── Market timing ────────────────────────────────────────────────────────────
+
+def _mins_to_close() -> float:
+    """
+    Return minutes until market close using Alpaca clock.
+    Returns -1 if market is closed, float('inf') on API failure.
+    """
+    try:
+        clock = get_clock()
+    except SystemExit:
+        return float("inf")
+    if not clock.get("is_open"):
+        return -1.0
+    nc_str = clock.get("next_close", "")
+    if not nc_str:
+        return float("inf")
+    nc  = datetime.fromisoformat(nc_str.replace("Z", "+00:00"))
+    now = datetime.now(timezone.utc)
+    return (nc - now).total_seconds() / 60.0
+
+
 # ── Buy option ────────────────────────────────────────────────────────────────
 
 def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> None:
@@ -254,12 +275,15 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
         print("  Ask price    : unavailable — market may be closed")
         print("  Warning      : budget cannot be verified; proceeding with market order")
 
-    # Market-hours advisory
-    clock = get_clock()
-    if not clock.get("is_open"):
-        nxt = clock.get("next_open", "?")[:16]
-        print(f"  Market       : CLOSED (next open ~{nxt})")
-        print("  Warning      : day orders placed after hours may expire unfilled")
+    # Market-hours hard block (autonomous rules)
+    mins = _mins_to_close()
+    if mins < 0:
+        print("SKIP: market is currently CLOSED — no autonomous trades outside hours")
+        return
+    if mins <= 30:
+        print(f"SKIP: {mins:.0f} min until close — no trades in last 30 min of session")
+        return
+    print(f"  Market       : OPEN  ({mins:.0f} min remaining)")
 
     # Place order
     order  = {"symbol": opt_symbol, "qty": "1", "side": "buy",
@@ -312,6 +336,55 @@ def close_position(symbol: str) -> None:
     status = result.get("status", "submitted") if result else "submitted"
     print(f"  Status       : {str(status).upper()}")
     print("  Position will fill at next market price")
+
+
+# ── Auto-monitor ─────────────────────────────────────────────────────────────
+
+def auto_monitor() -> None:
+    """
+    Hourly autonomous monitor: auto-close any options position at 90%+ gain.
+    Also checks market hours — skips if market is closed.
+    """
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    print(f"\n{LINE}")
+    print(f"  AUTO-MONITOR  |  {ts} ET")
+    print(LINE)
+
+    mins = _mins_to_close()
+    if mins < 0:
+        print("\n  Market is CLOSED — skipping auto-monitor.")
+        print()
+        return
+
+    results = check_options_pnl()
+    if not results:
+        print("\n  No open options positions.")
+        print()
+        return
+
+    closed = 0
+    for pos in results:
+        sym    = pos["symbol"]
+        pct    = pos["pl_pct"] * 100
+        parsed = _parse_occ(sym)
+        desc   = (f"{parsed['underlying']} ${parsed['strike']:.0f} "
+                  f"{parsed['type']} exp {parsed['expiration']}"
+                  if parsed else sym)
+
+        if pos["take_profit"]:
+            print(f"\n  *** AUTO-CLOSE: {sym} — {pct:+.1f}% gain — take profit ***")
+            print(f"  {desc}")
+            close_position(sym)
+            closed += 1
+        else:
+            bar = _pl_bar(pos["pl_pct"])
+            print(f"\n  Holding  {sym}")
+            print(f"  {desc}")
+            print(f"  P&L  {bar}  {pct:+.1f}%  — target is 90%+ to close")
+
+    summary = f"{closed} position(s) auto-closed" if closed else "no positions closed"
+    print(f"\n  Monitor complete — {summary}.")
+    print()
 
 
 # ── Formatters ────────────────────────────────────────────────────────────────
@@ -473,15 +546,15 @@ def cmd_close(symbol: str) -> None:
 
 USAGE = """\
 Cardona Trade — options order execution and position management
+Bot is FULLY AUTONOMOUS — trades fire automatically from the scanner.
 
 Watchlist: SPY QQQ TSLA AAPL NVDA MSFT AMZN META GOOGL GLD
 
 Usage:
   python3 scripts/cardona_trade.py status
+  python3 scripts/cardona_trade.py monitor
   python3 scripts/cardona_trade.py buy SPY  call 750  2026-05-30
-  python3 scripts/cardona_trade.py buy QQQ  put  460  2026-05-30
   python3 scripts/cardona_trade.py buy TSLA call 365  2026-05-30
-  python3 scripts/cardona_trade.py buy NVDA put  130  2026-05-30
   python3 scripts/cardona_trade.py positions
   python3 scripts/cardona_trade.py close <SYMBOL>
 
@@ -492,7 +565,8 @@ Strike guide:
 
 Commands:
   status                   Market clock + all positions with P&L
-  buy SYM DIR STRIKE EXP   Buy 1 options contract (max $200)
+  monitor                  Auto-close any position at 90%+ gain (hourly)
+  buy SYM DIR STRIKE EXP   Manual buy — enforces same rules as auto-trade
   positions                Options P&L with take-profit flags
   close SYMBOL             Sell-to-close a position
 """
@@ -509,6 +583,8 @@ def main() -> None:
 
     if cmd == "status":
         cmd_status()
+    elif cmd == "monitor":
+        auto_monitor()
     elif cmd == "positions":
         cmd_positions()
     elif cmd == "buy":

@@ -2,9 +2,11 @@
 """Cardona Strategy Scanner — 10-symbol options signal detection on 1H bars."""
 
 import os
+import re
+import subprocess
 import sys
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -222,6 +224,7 @@ def find_signals(
                     "pattern":   "Hammer",
                     "time":      sig["t"],
                     "close":     sig["c"],
+                    "conf_close": conf["c"],
                     "level":     lvl,
                     "level_tag": "support",
                     "confirmed": conf["c"] > conf["o"],
@@ -237,6 +240,7 @@ def find_signals(
                     "pattern":   "Hanging Man",
                     "time":      sig["t"],
                     "close":     sig["c"],
+                    "conf_close": conf["c"],
                     "level":     lvl,
                     "level_tag": "resistance",
                     "confirmed": conf["c"] < conf["o"],
@@ -275,6 +279,54 @@ def _suggested_strike(symbol: str, price: float, direction: str) -> float:
         return price + 10 if direction == "call" else price - 10
     raw = price * 1.02 if direction == "call" else price * 0.98
     return round(raw / 5) * 5
+
+
+# ── Autonomous trade helpers ──────────────────────────────────────────────────
+
+def _is_after_cutoff() -> bool:
+    """Block auto-trades at or after 3:30 PM ET (19:30 UTC during EDT)."""
+    utc = datetime.now(timezone.utc)
+    # 3:30 PM EDT = 19:30 UTC; conservative for EST overlap
+    return utc.hour > 19 or (utc.hour == 19 and utc.minute >= 30)
+
+
+def _is_earnings_day(symbol: str) -> bool:
+    """
+    Returns True if symbol has earnings today.
+    Requires an earnings-calendar API to implement fully — returns False
+    as a safe default until one is wired in.
+    """
+    return False
+
+
+def _next_expiry(min_days: int = 7, max_days: int = 14) -> str:
+    """
+    Return the nearest Friday at least min_days out, within max_days.
+    Falls back to any Friday ≥5 days if none found in primary range.
+    """
+    today = date.today()
+    for offset in range(min_days, max_days + 1):
+        d = today + timedelta(days=offset)
+        if d.weekday() == 4:          # Friday = 4
+            return d.isoformat()
+    for offset in range(5, max_days + 1):
+        d = today + timedelta(days=offset)
+        if d.weekday() == 4:
+            return d.isoformat()
+    return (today + timedelta(days=max_days)).isoformat()
+
+
+def _auto_trade(symbol: str, direction: str, strike: float, expiry: str) -> None:
+    """Call cardona_trade.py buy via subprocess and print its output."""
+    script = Path(__file__).parent / "cardona_trade.py"
+    cmd = [sys.executable, str(script), "buy",
+           symbol, direction, f"{strike:.0f}", expiry]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    for line in result.stdout.strip().split("\n"):
+        if line.strip():
+            print(f"    {line}")
+    if result.returncode != 0 and result.stderr.strip():
+        print(f"    ERROR: {result.stderr.strip()[:200]}")
 
 
 # ── Command: scan ─────────────────────────────────────────────────────────────
@@ -333,17 +385,20 @@ def cmd_scan() -> None:
             print(f"    ${lvl:<8.0f}  ({sign}{pct:.1f}%)  [{tag}]")
 
         _section("Signals")
+        latest_bar_time = bars[-1]["t"]
+
         if signals:
             for s in signals:
                 status = "CONFIRMED  " if s["confirmed"] else "unconfirmed"
                 entry  = s["close"]
+                direction = s["type"].lower()
+                strike = _suggested_strike(symbol, entry, direction)
+
                 if s["type"] == "CALL":
-                    strike = _suggested_strike(symbol, entry, "call")
                     action = f"Buy {symbol} ${strike:.0f} CALL  (≤2 wks, $200 max)"
                     warn   = tr != "uptrend"
                     warn_m = f"trend is {tr} — CALL requires uptrend"
                 else:
-                    strike = _suggested_strike(symbol, entry, "put")
                     action = f"Buy {symbol} ${strike:.0f} PUT   (≤2 wks, $200 max)"
                     warn   = tr != "downtrend"
                     warn_m = f"trend is {tr} — PUT requires downtrend"
@@ -355,6 +410,41 @@ def cmd_scan() -> None:
                 print(f"      Action    {action}")
                 if warn:
                     print(f"      !! WARN   {warn_m}")
+
+                # ── Autonomous entry logic ──────────────────────────────────
+                if not s["confirmed"]:
+                    continue
+                if s["conf_time"] != latest_bar_time:
+                    print(f"      AUTO      stale signal — skipping")
+                    continue
+                if warn:
+                    print(f"      AUTO      blocked — {warn_m}")
+                    continue
+
+                # No-chase: conf close must be within 0.5% of the S/R level
+                conf_price = s["conf_close"]
+                level      = s["level"]
+                if s["type"] == "CALL":
+                    drift = (conf_price - level) / level
+                else:
+                    drift = (level - conf_price) / level
+                if drift > PROXIMITY:
+                    print(f"      AUTO      blocked — price drifted "
+                          f"{drift*100:.2f}% past level (max {PROXIMITY*100:.1f}%)")
+                    continue
+
+                if _is_after_cutoff():
+                    print(f"      AUTO      blocked — after 3:30 PM ET cutoff")
+                    continue
+
+                if _is_earnings_day(symbol):
+                    print(f"      AUTO      blocked — {symbol} has earnings today")
+                    continue
+
+                expiry = _next_expiry()
+                print(f"\n    *** AUTO-TRADE FIRING ***")
+                print(f"    {symbol} {s['type']} ${strike:.0f} exp {expiry}")
+                _auto_trade(symbol, direction, strike, expiry)
         else:
             print(f"    No signals in last {SIGNAL_LOOKBACK} bars.")
 

@@ -1,6 +1,11 @@
 # /cardona_check — Complete Cardona Strategy Check
 
-Run a full Cardona strategy check. Execute every step below in order without skipping any.
+> **The bot is fully autonomous.** The scanner places trades automatically when
+> all conditions are met. This command is for human review only — to see what
+> the bot has done, what it is holding, and whether any action is needed.
+> You do not need to approve or place trades manually.
+
+Run a full strategy review. Execute every step below in order without skipping any.
 
 ## Step 1 — Read memory files
 
@@ -54,11 +59,11 @@ python3 scripts/cardona_trade.py status
 ```
 
 After showing output, flag any of these conditions clearly:
-- **TAKE PROFIT**: any option position up 90% or more → state the symbol and recommend closing now
-- **EXPIRY WARNING**: any option expiring within 2 days → state the symbol and expiry date
-- **SLOT AVAILABLE**: if fewer than 2 options positions are open → confirm how many slots are free
+- **TAKE PROFIT**: any option up 90%+ — note that `auto_monitor` should have already closed it; if still open, run `python3 scripts/cardona_trade.py monitor` manually
+- **EXPIRY WARNING**: any option expiring within 2 trading days → state the symbol and expiry date
+- **SLOT AVAILABLE**: if fewer than 2 options positions are open → confirm how many auto-trade slots are available
 
-## Step 6 — Compile the session verdict
+## Step 6 — Compile the session review
 
 After running all commands, write a clean summary in this format:
 
@@ -67,22 +72,29 @@ After running all commands, write a clean summary in this format:
 **CARDONA CHECK — [DATE] [TIME] ET**
 
 **Market Direction**
-- SPY: [UPTREND / DOWNTREND / SIDEWAYS] — [calls OK / puts OK / no trade]
-- QQQ: [UPTREND / DOWNTREND / SIDEWAYS] — [calls OK / puts OK / no trade]
+- SPY: [UPTREND / DOWNTREND / SIDEWAYS] — [bot will trade calls / puts / sitting out]
+- QQQ: [UPTREND / DOWNTREND / SIDEWAYS] — [bot will trade calls / puts / sitting out]
+- (list any other symbols with signals)
 
-**Active Signals**
-- [CONFIRMED / WATCHING / NONE] — describe any signals
+**Bot Activity Since Last Check**
+- Trades entered automatically: [list or NONE]
+- Positions auto-closed: [list or NONE]
+
+**Active Signals** (detected this scan)
+- [CONFIRMED → bot fired trade / WATCHING → unconfirmed / NONE]
 
 **Key Levels**
 - SPY support: $X.XX | resistance: $X.XX
-- QQQ support: $X.XX | resistance: $X.XX
+- (list key levels for any symbol showing a signal)
 
-**Open Positions** ([N] open, [N] slots free)
-- [symbol]: [+X% → TAKE PROFIT / holding / expiry warning]
+**Open Positions** ([N] open, [N] auto-trade slots free)
+- [symbol]: [+X%] — [holding / expiry warning / take-profit missed — run monitor]
 
-**Action Required**
-- [what to do right now, if anything — be specific]
+**Human Action Required**
+- If a take-profit was missed by auto-monitor: `python3 scripts/cardona_trade.py monitor`
+- If a position has an expiry warning: review and decide whether to close manually
+- Otherwise: NONE — the bot is handling everything
 
 ---
 
-If there is nothing to do (sideways trend, no signals, no take profits), say so explicitly. Do not suggest trades that violate strategy rules.
+The bot acts autonomously. Only flag items that require a human decision that the bot cannot make (e.g. missed take-profit, expiry in <2 days, unexpected position, account issue).
