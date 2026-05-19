@@ -1,0 +1,184 @@
+{
+  "timezone": "America/New_York",
+  "market_days": "Monday-Friday",
+  "routines": [
+    {
+      "name": "morning_scan",
+      "description": "Morning market open scan — assess trend, map S/R, look for opening signals",
+      "schedule": "30 9 * * 1-5",
+      "cron": "30 9 * * 1-5",
+      "time_et": "9:30 AM",
+      "commands": [
+        "python3 scripts/cardona_scanner.py scan"
+      ],
+      "actions": [
+        "Run full scanner on SPY and QQQ",
+        "Determine market direction (uptrend / downtrend / sideways)",
+        "Identify key support and resistance levels for the session",
+        "Check for any opening hammer or hanging man signals on first 1H candle",
+        "Write scan results to journal/YYYY-MM-DD-morning.json",
+        "If confirmed signal exists and trend aligns: execute buy via cardona_trade.py"
+      ],
+      "journal_file": "journal/{date}-morning.json",
+      "no_trade_condition": "Sideways trend on 1H chart — wait for direction"
+    },
+    {
+      "name": "hourly_check_1000",
+      "description": "10:00 AM hourly pattern scan",
+      "schedule": "0 10 * * 1-5",
+      "cron": "0 10 * * 1-5",
+      "time_et": "10:00 AM",
+      "commands": [
+        "python3 scripts/cardona_scanner.py scan",
+        "python3 scripts/cardona_trade.py positions"
+      ],
+      "actions": [
+        "Scan SPY and QQQ for new hammer or hanging man signals",
+        "Check all open options positions for take profit (90%+ gain)",
+        "If take profit threshold hit: execute close via cardona_trade.py close",
+        "If new confirmed signal and trend aligns and slots available: execute buy",
+        "Log check results to journal/YYYY-MM-DD-1000.json"
+      ],
+      "journal_file": "journal/{date}-1000.json"
+    },
+    {
+      "name": "hourly_check_1100",
+      "description": "11:00 AM hourly pattern scan",
+      "schedule": "0 11 * * 1-5",
+      "cron": "0 11 * * 1-5",
+      "time_et": "11:00 AM",
+      "commands": [
+        "python3 scripts/cardona_scanner.py scan",
+        "python3 scripts/cardona_trade.py positions"
+      ],
+      "actions": [
+        "Scan SPY and QQQ for new hammer or hanging man signals",
+        "Check all open options positions for take profit (90%+ gain)",
+        "If take profit threshold hit: execute close via cardona_trade.py close",
+        "If new confirmed signal and trend aligns and slots available: execute buy",
+        "Log check results to journal/YYYY-MM-DD-1100.json"
+      ],
+      "journal_file": "journal/{date}-1100.json"
+    },
+    {
+      "name": "hourly_check_1200",
+      "description": "12:00 PM hourly pattern scan",
+      "schedule": "0 12 * * 1-5",
+      "cron": "0 12 * * 1-5",
+      "time_et": "12:00 PM",
+      "commands": [
+        "python3 scripts/cardona_scanner.py scan",
+        "python3 scripts/cardona_trade.py positions"
+      ],
+      "actions": [
+        "Scan SPY and QQQ for new hammer or hanging man signals",
+        "Check all open options positions for take profit (90%+ gain)",
+        "If take profit threshold hit: execute close via cardona_trade.py close",
+        "If new confirmed signal and trend aligns and slots available: execute buy",
+        "Log check results to journal/YYYY-MM-DD-1200.json"
+      ],
+      "journal_file": "journal/{date}-1200.json"
+    },
+    {
+      "name": "hourly_check_1300",
+      "description": "1:00 PM hourly pattern scan",
+      "schedule": "0 13 * * 1-5",
+      "cron": "0 13 * * 1-5",
+      "time_et": "1:00 PM",
+      "commands": [
+        "python3 scripts/cardona_scanner.py scan",
+        "python3 scripts/cardona_trade.py positions"
+      ],
+      "actions": [
+        "Scan SPY and QQQ for new hammer or hanging man signals",
+        "Check all open options positions for take profit (90%+ gain)",
+        "If take profit threshold hit: execute close via cardona_trade.py close",
+        "If new confirmed signal and trend aligns and slots available: execute buy",
+        "Log check results to journal/YYYY-MM-DD-1300.json"
+      ],
+      "journal_file": "journal/{date}-1300.json"
+    },
+    {
+      "name": "hourly_check_1400",
+      "description": "2:00 PM hourly pattern scan",
+      "schedule": "0 14 * * 1-5",
+      "cron": "0 14 * * 1-5",
+      "time_et": "2:00 PM",
+      "commands": [
+        "python3 scripts/cardona_scanner.py scan",
+        "python3 scripts/cardona_trade.py positions"
+      ],
+      "actions": [
+        "Scan SPY and QQQ for new hammer or hanging man signals",
+        "Check all open options positions for take profit (90%+ gain)",
+        "If take profit threshold hit: execute close via cardona_trade.py close",
+        "If new confirmed signal and trend aligns and slots available: execute buy",
+        "Log check results to journal/YYYY-MM-DD-1400.json"
+      ],
+      "journal_file": "journal/{date}-1400.json"
+    },
+    {
+      "name": "hourly_check_1500",
+      "description": "3:00 PM hourly pattern scan — last entry window",
+      "schedule": "0 15 * * 1-5",
+      "cron": "0 15 * * 1-5",
+      "time_et": "3:00 PM",
+      "commands": [
+        "python3 scripts/cardona_scanner.py scan",
+        "python3 scripts/cardona_trade.py positions"
+      ],
+      "actions": [
+        "Scan SPY and QQQ for new hammer or hanging man signals",
+        "Check all open options positions for take profit (90%+ gain)",
+        "If take profit threshold hit: execute close via cardona_trade.py close",
+        "If new confirmed signal and trend aligns and slots available: execute buy",
+        "Log check results to journal/YYYY-MM-DD-1500.json",
+        "Note: this is the last entry window of the day — no new trades after 3 PM"
+      ],
+      "journal_file": "journal/{date}-1500.json",
+      "last_entry_window": true
+    },
+    {
+      "name": "eod_journal",
+      "description": "End of day journal — summarize session, update lessons, send email digest",
+      "schedule": "15 16 * * 1-5",
+      "cron": "15 16 * * 1-5",
+      "time_et": "4:15 PM",
+      "commands": [
+        "python3 scripts/cardona_trade.py status",
+        "python3 scripts/notify.py"
+      ],
+      "actions": [
+        "Pull final positions and P&L from cardona_trade.py status",
+        "Review all trades opened or closed today",
+        "Write lessons for any closed trades to memory/lessons.md",
+        "Update memory/cycles.md with today's trade results",
+        "Write full daily summary to journal/YYYY-MM-DD-eod.json",
+        "Send email digest via notify.py"
+      ],
+      "journal_file": "journal/{date}-eod.json",
+      "eod_journal_fields": [
+        "date",
+        "trades_opened",
+        "trades_closed",
+        "pnl_realized",
+        "pnl_unrealized",
+        "positions_open",
+        "signals_seen",
+        "trades_skipped_reason",
+        "lesson",
+        "cycle_record"
+      ]
+    }
+  ],
+  "notes": [
+    "All times are Eastern Time (ET)",
+    "No trades allowed when market direction is SIDEWAYS on 1H chart",
+    "No new trades after 3:00 PM ET — existing positions can still be monitored",
+    "Max 2 options positions open at any time",
+    "Max $200 per trade — budget enforced by cardona_trade.py",
+    "Take profit at 90%+ gain — close immediately",
+    "Stop loss: none — let options expire per Cardona strategy",
+    "Run /cardona_check in Claude Code for a full manual check at any time"
+  ]
+}
