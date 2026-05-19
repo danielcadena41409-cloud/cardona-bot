@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cardona Strategy Scanner — SPY/QQQ options signal detection on 1H bars."""
+"""Cardona Strategy Scanner — 10-symbol options signal detection on 1H bars."""
 
 import os
 import sys
@@ -9,7 +9,8 @@ from pathlib import Path
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-SYMBOLS      = ["SPY", "QQQ"]
+SYMBOLS      = ["SPY", "QQQ", "TSLA", "AAPL", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "GLD"]
+FIXED_OTM    = {"SPY", "QQQ"}   # 10-point OTM; all others use 2% OTM rounded to $5
 TIMEFRAME    = "1Hour"
 LOOKBACK_DAYS   = 10     # ~70 bars across 7 trading days
 LAST_N_BARS     = 20     # window for S/R analysis
@@ -266,6 +267,16 @@ def _section(title: str) -> None:
     print(f"  {'·' * (len(title))}")
 
 
+def _suggested_strike(symbol: str, price: float, direction: str) -> float:
+    """
+    Strike ~10 pts OTM for SPY/QQQ; ~2% OTM rounded to nearest $5 for stocks.
+    """
+    if symbol in FIXED_OTM:
+        return price + 10 if direction == "call" else price - 10
+    raw = price * 1.02 if direction == "call" else price * 0.98
+    return round(raw / 5) * 5
+
+
 # ── Command: scan ─────────────────────────────────────────────────────────────
 
 def cmd_scan() -> None:
@@ -327,12 +338,12 @@ def cmd_scan() -> None:
                 status = "CONFIRMED  " if s["confirmed"] else "unconfirmed"
                 entry  = s["close"]
                 if s["type"] == "CALL":
-                    strike = entry + 10
+                    strike = _suggested_strike(symbol, entry, "call")
                     action = f"Buy {symbol} ${strike:.0f} CALL  (≤2 wks, $200 max)"
                     warn   = tr != "uptrend"
                     warn_m = f"trend is {tr} — CALL requires uptrend"
                 else:
-                    strike = entry - 10
+                    strike = _suggested_strike(symbol, entry, "put")
                     action = f"Buy {symbol} ${strike:.0f} PUT   (≤2 wks, $200 max)"
                     warn   = tr != "downtrend"
                     warn_m = f"trend is {tr} — PUT requires downtrend"
@@ -436,13 +447,15 @@ def cmd_levels(symbol: str) -> None:
 USAGE = """\
 Cardona Strategy Scanner
 
+Watchlist: SPY QQQ TSLA AAPL NVDA MSFT AMZN META GOOGL GLD
+
 Usage:
   python3 scripts/cardona_scanner.py scan
   python3 scripts/cardona_scanner.py candles SPY
-  python3 scripts/cardona_scanner.py levels  SPY
+  python3 scripts/cardona_scanner.py levels  TSLA
 
 Commands:
-  scan          Full signal report for SPY and QQQ
+  scan          Full signal report for all 10 symbols
   candles SYM   Last 10 one-hour bars with pattern markers
   levels  SYM   Support, resistance, and round-number levels
 """

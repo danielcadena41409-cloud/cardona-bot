@@ -1,9 +1,14 @@
 # Cardona Strategy Bot — Rules & Configuration
 
 ## INSTRUMENTS
-- SPY and QQQ options only
+
+**Watchlist (10 symbols):** SPY, QQQ, TSLA, AAPL, NVDA, MSFT, AMZN, META, GOOGL, GLD
+
+- Options only (calls and puts) on all 10 symbols
 - Weekly options, maximum 2 weeks to expiration
-- Strike price approximately 10 points out of the money
+- **Strike price:**
+  - SPY and QQQ: approximately 10 points out of the money
+  - All other symbols: approximately 2% out of the money, rounded to nearest $5 strike
 
 ---
 

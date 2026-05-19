@@ -14,12 +14,19 @@ Paper trades SPY and QQQ options using a pattern-recognition strategy on 1-hour 
 
 | Field | Rule |
 |-------|------|
-| Symbols | SPY and QQQ only — no other underlyings |
-| Asset class | Options (calls and puts) |
+| Watchlist | SPY, QQQ, TSLA, AAPL, NVDA, MSFT, AMZN, META, GOOGL, GLD |
+| Asset class | Options (calls and puts) on all 10 symbols |
 | Expiration | Weekly options, maximum 2 weeks to expiration |
-| Strike | Approximately 10 points OTM from current price |
+| Strike — SPY / QQQ | Approximately **10 points OTM** from current price |
+| Strike — all others | Approximately **2% OTM**, rounded to nearest $5 strike |
 | Contracts | 1 contract per trade |
 | Account | Paper trading only |
+
+**Strike examples:**
+- SPY at $740 → $750 call / $730 put (10 pts)
+- TSLA at $350 → $360 call / $340 put (2% ≈ $7, rounded to $5 increment)
+- NVDA at $130 → $135 call / $125 put (2% ≈ $2.60, rounded to $5 increment)
+- GLD at $310 → $320 call / $305 put (2% ≈ $6.20, rounded to $5 increment)
 
 ---
 

@@ -17,6 +17,13 @@ TP_THRESHOLD  = 0.90        # 90% gain → flag take profit
 MAX_POSITIONS = 2
 MAX_EXP_DAYS  = 14
 
+WATCHLIST = {
+    "SPY", "QQQ",                          # index ETFs — 10-pt OTM
+    "TSLA", "AAPL", "NVDA", "MSFT",        # mega-cap tech
+    "AMZN", "META", "GOOGL", "GLD",        # mega-cap + commodity
+}
+FIXED_OTM = {"SPY", "QQQ"}                # use flat 10-pt OTM for these two
+
 # OCC option symbol: up to 6 letters + 6-digit date (YYMMDD) + C/P + 8-digit strike
 OPTION_RE = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
 LINE      = "─" * 70
@@ -86,6 +93,23 @@ def _data_get(path: str, params: dict = None) -> dict:
     return r.json()
 
 
+# ── Strike calculation ────────────────────────────────────────────────────────
+
+def calc_strike(symbol: str, price: float, direction: str) -> float:
+    """
+    Suggested OTM strike for the buy command and signal display.
+
+    SPY / QQQ  : flat 10 points OTM (matches the original Cardona rule)
+    All others : 2% OTM, rounded to the nearest $5 strike increment
+                 (stock prices vary too widely for a fixed-point offset)
+    """
+    sym = symbol.upper()
+    if sym in FIXED_OTM:
+        return price + 10.0 if direction == "call" else price - 10.0
+    raw = price * 1.02 if direction == "call" else price * 0.98
+    return round(raw / 5) * 5
+
+
 # ── Core API calls ────────────────────────────────────────────────────────────
 
 def get_clock() -> dict:
@@ -150,13 +174,20 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
     """
     Find the best-matching options contract and place a market buy order.
 
-    symbol     : SPY or QQQ
+    symbol     : any symbol in WATCHLIST — SPY, QQQ, TSLA, AAPL, NVDA, MSFT,
+                 AMZN, META, GOOGL, GLD
     direction  : call or put
-    strike     : requested strike price (e.g. 750.0)
+    strike     : use calc_strike(symbol, price, direction) for the suggested value
     expiration : YYYY-MM-DD (must be ≤14 days out)
     """
     today    = date.today()
     opt_type = direction.lower()
+
+    if symbol.upper() not in WATCHLIST:
+        sys.exit(
+            f"ERROR: '{symbol}' is not in the Cardona watchlist.\n"
+            f"Valid: {', '.join(sorted(WATCHLIST))}"
+        )
 
     if opt_type not in ("call", "put"):
         sys.exit(f"ERROR: direction must be 'call' or 'put', got '{direction}'")
@@ -443,12 +474,21 @@ def cmd_close(symbol: str) -> None:
 USAGE = """\
 Cardona Trade — options order execution and position management
 
+Watchlist: SPY QQQ TSLA AAPL NVDA MSFT AMZN META GOOGL GLD
+
 Usage:
   python3 scripts/cardona_trade.py status
-  python3 scripts/cardona_trade.py buy SPY call 750 2026-05-30
-  python3 scripts/cardona_trade.py buy QQQ put  460 2026-05-30
+  python3 scripts/cardona_trade.py buy SPY  call 750  2026-05-30
+  python3 scripts/cardona_trade.py buy QQQ  put  460  2026-05-30
+  python3 scripts/cardona_trade.py buy TSLA call 365  2026-05-30
+  python3 scripts/cardona_trade.py buy NVDA put  130  2026-05-30
   python3 scripts/cardona_trade.py positions
   python3 scripts/cardona_trade.py close <SYMBOL>
+
+Strike guide:
+  SPY / QQQ     ~10 pts OTM  (e.g. SPY at $740 → $750 call or $730 put)
+  All others    ~2% OTM rounded to nearest $5
+                (e.g. TSLA at $350 → $360 call or $340 put)
 
 Commands:
   status                   Market clock + all positions with P&L
