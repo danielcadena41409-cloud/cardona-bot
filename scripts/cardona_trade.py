@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Cardona Trade — options order execution and position management."""
 
+import json
 import os
 import re
 import sys
@@ -25,8 +26,9 @@ WATCHLIST = {
 FIXED_OTM = {"SPY", "QQQ"}                # use flat 10-pt OTM for these two
 
 # OCC option symbol: up to 6 letters + 6-digit date (YYMMDD) + C/P + 8-digit strike
-OPTION_RE = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
-LINE      = "─" * 70
+OPTION_RE      = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
+LINE           = "─" * 70
+POSITIONS_FILE = Path(__file__).parent.parent / "data" / "cardona_positions.json"
 
 
 # ── Environment ───────────────────────────────────────────────────────────────
@@ -91,6 +93,49 @@ def _data_get(path: str, params: dict = None) -> dict:
     if not r.ok:
         sys.exit(f"Data API {r.status_code}: {r.text[:300]}")
     return r.json()
+
+
+# ── Local position registry ───────────────────────────────────────────────────
+# Tracks only Cardona's own contracts so the 2-position limit and auto_monitor
+# ignore positions held by other bots sharing the same Alpaca paper account.
+
+def _load_cardona_positions() -> dict:
+    """Return {occ_symbol: metadata_dict} from data/cardona_positions.json."""
+    if not POSITIONS_FILE.exists():
+        return {}
+    try:
+        return json.loads(POSITIONS_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_cardona_positions(positions: dict) -> None:
+    POSITIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    POSITIONS_FILE.write_text(json.dumps(positions, indent=2))
+
+
+def _register_position(occ_symbol: str, expiry: str, entry_price_est: float) -> None:
+    """Write a newly bought contract into the Cardona position registry."""
+    parsed    = _parse_occ(occ_symbol)
+    positions = _load_cardona_positions()
+    positions[occ_symbol] = {
+        "entry_date":         date.today().isoformat(),
+        "expiry":             expiry,
+        "entry_price_estimate": round(entry_price_est, 4),
+        "underlying":         parsed.get("underlying", ""),
+        "type":               parsed.get("type", ""),
+        "strike":             parsed.get("strike", 0),
+    }
+    _save_cardona_positions(positions)
+    print(f"  Registered   : {occ_symbol} → data/cardona_positions.json")
+
+
+def _unregister_position(occ_symbol: str) -> None:
+    """Remove a closed contract from the Cardona position registry."""
+    positions = _load_cardona_positions()
+    if occ_symbol in positions:
+        del positions[occ_symbol]
+        _save_cardona_positions(positions)
 
 
 # ── Strike calculation ────────────────────────────────────────────────────────
@@ -226,11 +271,11 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
         print(f"SKIP: {expiration} is {days_out} days out — max {MAX_EXP_DAYS}")
         return
 
-    # Enforce position limit
-    positions = get_positions()
-    n_opts    = sum(1 for p in positions if is_option(p["symbol"]))
-    if n_opts >= MAX_POSITIONS:
-        print(f"SKIP: already {n_opts} open options positions (max {MAX_POSITIONS})")
+    # Enforce position limit — count only Cardona's own tracked positions
+    cardona_positions = _load_cardona_positions()
+    n_cardona = len(cardona_positions)
+    if n_cardona >= MAX_POSITIONS:
+        print(f"SKIP: already {n_cardona} open Cardona positions (max {MAX_POSITIONS})")
         return
 
     # Search options chain
@@ -294,18 +339,23 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
     print(f"  Status       : {result.get('status', 'unknown').upper()}")
     print(f"  Strategy     : hold to 100% gain — let losers expire (Cardona rules)")
 
+    # Track in local registry so auto_monitor ignores other bots' positions
+    _register_position(opt_symbol, best_exp, ask if ask else 0.0)
+
 
 # ── P&L check ─────────────────────────────────────────────────────────────────
 
 def check_options_pnl() -> list:
-    """Return enriched list of open options positions with P&L and TP flag."""
+    """Return enriched P&L list for Cardona's own positions only."""
+    cardona_syms = set(_load_cardona_positions().keys())
     results = []
     for pos in get_positions():
-        if not is_option(pos["symbol"]):
+        sym = pos["symbol"]
+        if sym not in cardona_syms:
             continue
         pl_pct = float(pos.get("unrealized_plpc", 0))   # fraction: 0.90 = 90%
         results.append({
-            "symbol":       pos["symbol"],
+            "symbol":       sym,
             "qty":          float(pos.get("qty", 0)),
             "entry":        float(pos.get("avg_entry_price", 0)),
             "current":      float(pos.get("current_price", 0)),
@@ -336,6 +386,7 @@ def close_position(symbol: str) -> None:
     status = result.get("status", "submitted") if result else "submitted"
     print(f"  Status       : {str(status).upper()}")
     print("  Position will fill at next market price")
+    _unregister_position(symbol)
 
 
 # ── Auto-monitor ─────────────────────────────────────────────────────────────
@@ -356,9 +407,9 @@ def auto_monitor() -> None:
         print()
         return
 
-    results = check_options_pnl()
+    results = check_options_pnl()   # already filtered to Cardona-tracked positions
     if not results:
-        print("\n  No open options positions.")
+        print("\n  No open Cardona positions.")
         print()
         return
 
@@ -435,9 +486,10 @@ def cmd_status() -> None:
     if cash != "?":
         print(f"  Cash     : ${float(cash):>12,.2f}")
 
-    n_opts = sum(1 for p in positions if is_option(p["symbol"]))
-    print(f"\n  Positions: {len(positions)} total  |  {n_opts} options  "
-          f"({MAX_POSITIONS - n_opts} slot(s) available)")
+    n_all_opts = sum(1 for p in positions if is_option(p["symbol"]))
+    n_cardona  = len(_load_cardona_positions())
+    print(f"\n  Positions: {len(positions)} total  |  {n_all_opts} options in account  "
+          f"|  {n_cardona} Cardona  ({MAX_POSITIONS - n_cardona} slot(s) available)")
 
     if positions:
         print()

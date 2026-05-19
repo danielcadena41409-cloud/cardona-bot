@@ -304,6 +304,19 @@ def _dte(expiration: str) -> int:
         return -1
 
 
+# ── Cardona position registry ─────────────────────────────────────────────────
+
+def load_cardona_position_syms() -> set:
+    """Return the set of OCC symbols Cardona owns per data/cardona_positions.json."""
+    path = Path(__file__).parent.parent / "data" / "cardona_positions.json"
+    if not path.exists():
+        return set()
+    try:
+        return set(json.loads(path.read_text()).keys())
+    except Exception:
+        return set()
+
+
 # ── Memory files ───────────────────────────────────────────────────────────────
 
 def read_lessons(n: int = 5) -> list:
@@ -385,10 +398,12 @@ def _thead(*headers) -> str:
 def build_html(today: str, positions: list, account: dict,
                scan_results: list, orders: list, lessons: list) -> str:
 
-    ts      = datetime.now().strftime("%Y-%m-%d %H:%M ET")
-    equity  = account.get("equity")
-    cash    = account.get("cash")
-    opts    = [p for p in positions if OPTION_RE.match(p["symbol"])]
+    ts             = datetime.now().strftime("%Y-%m-%d %H:%M ET")
+    equity         = account.get("equity")
+    cash           = account.get("cash")
+    cardona_syms   = load_cardona_position_syms()
+    opts           = [p for p in positions
+                      if OPTION_RE.match(p["symbol"]) and p["symbol"] in cardona_syms]
 
     # Collect all signals with their symbol
     all_signals: list = []
@@ -734,7 +749,9 @@ def build_html(today: str, positions: list, account: dict,
 
 def build_text(today: str, positions: list, scan_results: list,
                orders: list, lessons: list) -> str:
-    opts = [p for p in positions if OPTION_RE.match(p["symbol"])]
+    cardona_syms = load_cardona_position_syms()
+    opts = [p for p in positions
+            if OPTION_RE.match(p["symbol"]) and p["symbol"] in cardona_syms]
     all_signals = []
     for sr in scan_results:
         for s in sr.get("signals", []):
@@ -858,9 +875,10 @@ def main() -> None:
     print("Running EOD scan:")
     scan_results = scan_all()
 
-    lessons = read_lessons()
-
-    opts    = [p for p in positions if OPTION_RE.match(p["symbol"])]
+    lessons      = read_lessons()
+    cardona_syms = load_cardona_position_syms()
+    opts         = [p for p in positions
+                    if OPTION_RE.match(p["symbol"]) and p["symbol"] in cardona_syms]
     all_sigs = []
     for sr in scan_results:
         for s in sr.get("signals", []):
