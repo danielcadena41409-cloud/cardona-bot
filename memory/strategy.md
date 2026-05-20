@@ -235,6 +235,23 @@ Run `/cardona_check` in Claude Code for a complete manual strategy check at any 
 
 ---
 
+## REGIME FILTER
+
+At scan start, read `~/trading-agent/data/regime.json`. The Markov regime overrides normal entry bias for the session.
+
+| Regime | Effect on Cardona |
+|--------|-------------------|
+| **BULL_TRENDING** | Favor calls. If a symbol has both CALL and PUT signals, take the CALL only. |
+| **BEAR_TRENDING** | Favor puts. If a symbol has both CALL and PUT signals, take the PUT only. |
+| **HIGH_VOLATILITY** | All auto-trades blocked. Bot scans but does not enter. Log "HIGH_VOLATILITY regime blocked entry" in journal. |
+| **SIDEWAYS** | Normal rules but drift tolerance tightens: 0.5% → 0.3% (no-chase threshold). |
+
+**Default on failure:** If `regime.json` is missing or unreadable, default to SIDEWAYS.
+
+Regime + tomorrow forecast are shown at the top of every scan output and in the EOD email.
+
+---
+
 ## HARD RULES — NEVER VIOLATE
 
 1. SPY and QQQ options only
@@ -247,3 +264,4 @@ Run `/cardona_check` in Claude Code for a complete manual strategy check at any 
 8. Close winners at 100% gain (flag at 90%)
 9. No trades after 3:00 PM ET
 10. Read memory files at every session start
+11. Read regime file at every session start — apply regime rules before any entry

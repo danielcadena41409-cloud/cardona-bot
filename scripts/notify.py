@@ -29,6 +29,7 @@ SIGNAL_LOOKBACK = 5
 ROUND_STEP   = 5
 ROUND_RANGE  = 30
 PROXIMITY    = 0.005
+REGIME_FILE  = Path.home() / "trading-agent" / "data" / "regime.json"
 
 # ── Colors ─────────────────────────────────────────────────────────────────────
 BG     = "#080c14"
@@ -295,6 +296,20 @@ def load_cardona_positions() -> dict:
         return {}
 
 
+def read_regime() -> dict:
+    """Read Markov regime output. Returns safe SIDEWAYS default if unavailable."""
+    try:
+        if REGIME_FILE.exists():
+            return json.loads(REGIME_FILE.read_text())
+    except Exception:
+        pass
+    return {
+        "current_regime": "SIDEWAYS",
+        "tomorrow_forecast": {"most_likely": "SIDEWAYS"},
+        "bot_instructions": {"cardona": "Normal rules apply."},
+    }
+
+
 # ── Memory files ───────────────────────────────────────────────────────────────
 
 def read_lessons(n: int = 3) -> list:
@@ -337,7 +352,7 @@ def read_cycles_summary() -> dict:
 # ── Self-evaluation generator ──────────────────────────────────────────────────
 
 def _generate_self_eval(scan_results: list, cardona_positions: dict,
-                        today: str) -> dict:
+                        today: str, regime: str = "SIDEWAYS") -> dict:
     """Return {q1, q2, q3} as plain strings for inclusion in email."""
 
     all_signals = []
@@ -377,6 +392,7 @@ def _generate_self_eval(scan_results: list, cardona_positions: dict,
         missed_parts = []
         fired_parts  = []
         n_positions  = len(cardona_positions)
+        effective_drift = 0.003 if regime == "SIDEWAYS" else PROXIMITY
         for s in confirmed:
             sym       = s["symbol"]
             sig_type  = s["type"]
@@ -388,10 +404,15 @@ def _generate_self_eval(scan_results: list, cardona_positions: dict,
             level      = s["level"]
             drift      = ((conf_price - level) / level if sig_type == "CALL"
                           else (level - conf_price) / level)
-            chase_ok   = drift <= PROXIMITY
+            chase_ok   = drift <= effective_drift
+            regime_ok  = regime != "HIGH_VOLATILITY"
 
-            if trend_ok and slot_ok and chase_ok:
+            if trend_ok and slot_ok and chase_ok and regime_ok:
                 fired_parts.append(f"{sym} {sig_type}")
+            elif not regime_ok:
+                missed_parts.append(
+                    f"{sym} {sig_type} blocked — HIGH_VOLATILITY regime (all entries paused)"
+                )
             elif not trend_ok:
                 need = "uptrend" if sig_type == "CALL" else "downtrend"
                 missed_parts.append(
@@ -405,7 +426,7 @@ def _generate_self_eval(scan_results: list, cardona_positions: dict,
             elif not chase_ok:
                 missed_parts.append(
                     f"{sym} {sig_type} blocked — price drifted "
-                    f"{drift*100:.2f}% past level (max 0.5%)"
+                    f"{drift*100:.2f}% past level (max {effective_drift*100:.1f}%)"
                 )
 
         lines = []
@@ -446,6 +467,14 @@ def _generate_self_eval(scan_results: list, cardona_positions: dict,
         "SPY and QQQ trend direction at the open sets the session bias. "
         "Calls only in uptrend, puts only in downtrend, sit out sideways."
     )
+    regime_notes = {
+        "BULL_TRENDING":   "Regime favors calls — prefer CALL signals and full engagement.",
+        "BEAR_TRENDING":   "Regime favors puts — prefer PUT signals, avoid calls.",
+        "HIGH_VOLATILITY": "HIGH VOLATILITY regime active — all new entries remain blocked until regime clears.",
+        "SIDEWAYS":        "SIDEWAYS regime — stronger confirmation required (0.3% drift limit).",
+    }
+    if regime in regime_notes:
+        lines3.append(regime_notes[regime])
     q3 = " ".join(lines3)
 
     return {"q1": q1, "q2": q2, "q3": q3}
@@ -528,7 +557,22 @@ def _pct_color(pct: float) -> str:
 
 def build_html(today: str, positions: list, account: dict,
                scan_results: list, orders: list,
-               cardona_positions: dict, lessons: list) -> str:
+               cardona_positions: dict, lessons: list,
+               regime_data: dict | None = None) -> str:
+
+    if regime_data is None:
+        regime_data = {}
+    regime       = regime_data.get("current_regime", "SIDEWAYS")
+    tomorrow_reg = regime_data.get("tomorrow_forecast", {}).get("most_likely", "SIDEWAYS")
+    cardona_rule = regime_data.get("bot_instructions", {}).get("cardona", "")
+    _regime_cfg  = {
+        "BULL_TRENDING":   (GREEN,  "▲"),
+        "BEAR_TRENDING":   (RED,    "▼"),
+        "HIGH_VOLATILITY": (YELLOW, "⚡"),
+        "SIDEWAYS":        (YELLOW, "↔"),
+    }
+    r_color, r_icon = _regime_cfg.get(regime, (DIM, "?"))
+    t_color, t_icon = _regime_cfg.get(tomorrow_reg, (DIM, "?"))
 
     ts           = datetime.now().strftime("%I:%M %p ET").lstrip("0")
     today_label  = date.today().strftime("%A, %B %-d, %Y")
@@ -559,7 +603,7 @@ def build_html(today: str, positions: list, account: dict,
                     if meta.get("entry_date") == today}
 
     # Self-evaluation
-    self_eval = _generate_self_eval(scan_results, cardona_positions, today)
+    self_eval = _generate_self_eval(scan_results, cardona_positions, today, regime)
 
     # Cycle data
     cycle = read_cycles_summary()
@@ -609,6 +653,22 @@ def build_html(today: str, positions: list, account: dict,
   <h1 style="{title_style}">Cardona Bot Journal</h1>
   <p style="{sub_style}">{today_label} &nbsp;·&nbsp; Generated {ts}</p>
 </div>""")
+
+    # ── REGIME BANNER ─────────────────────────────────────────────────────────
+    regime_rule_span = (f'<span style="color:{DIM};font-size:11px;font-family:{_FONT}">'
+                        f'· {cardona_rule}</span>' if cardona_rule else "")
+    html_parts.append(
+        f'<div style="background:{CARD};border-left:3px solid {r_color};'
+        f'padding:10px 16px;margin-bottom:20px;border-radius:0 4px 4px 0">'
+        f'<span style="color:{r_color};font-weight:600;font-size:13px;'
+        f'font-family:{_FONT}">{r_icon} REGIME: {regime}</span>'
+        f'&nbsp;&nbsp;&nbsp;'
+        f'<span style="color:{DIM};font-size:12px;font-family:{_FONT}">'
+        f'Tomorrow: <span style="color:{t_color};font-weight:500">'
+        f'{t_icon} {tomorrow_reg}</span></span>'
+        f'&nbsp;&nbsp;{regime_rule_span}'
+        f'</div>'
+    )
 
     # ── STAT STRIP (equity / cash / day P&L / slots) ──────────────────────────
     stat_cell = (f"background:{CARD};border:1px solid {BORDER};border-radius:6px;"
@@ -839,7 +899,13 @@ def build_html(today: str, positions: list, account: dict,
 
 def build_text(today: str, positions: list, account: dict,
                scan_results: list, cardona_positions: dict,
-               lessons: list) -> str:
+               lessons: list, regime_data: dict | None = None) -> str:
+    if regime_data is None:
+        regime_data = {}
+    regime       = regime_data.get("current_regime", "SIDEWAYS")
+    tomorrow_reg = regime_data.get("tomorrow_forecast", {}).get("most_likely", "SIDEWAYS")
+    cardona_rule = regime_data.get("bot_instructions", {}).get("cardona", "")
+
     equity  = account.get("equity")
     cash    = account.get("cash")
     equity_f = float(equity) if equity else 0.0
@@ -856,6 +922,9 @@ def build_text(today: str, positions: list, account: dict,
     lines = [
         f"CARDONA BOT JOURNAL — {today_label}",
         "=" * 62, "",
+        f"Regime: {regime}  |  Tomorrow: {tomorrow_reg}",
+        f"Cardona rule: {cardona_rule}" if cardona_rule else "",
+        "",
         f"Equity: ${equity_f:,.2f}  |  Cash: ${cash_f:,.2f}  |  "
         f"Day P&L: {pl_sign}${abs(day_pl):,.2f}", "",
     ]
@@ -904,7 +973,7 @@ def build_text(today: str, positions: list, account: dict,
         lines.append("  None (2 slots available)")
 
     # Self eval
-    se = _generate_self_eval(scan_results, cardona_positions, today)
+    se = _generate_self_eval(scan_results, cardona_positions, today, regime)
     cycle = read_cycles_summary()
     lines += ["", f"CYCLE {cycle['cycle']} — {cycle['trades']}/10 trades  "
               f"({cycle['wins']}W / {cycle['losses']}L)"]
@@ -984,6 +1053,7 @@ def main() -> None:
     account           = get_account()
     orders            = get_orders_today(today)
     cardona_positions = load_cardona_positions()
+    regime_data       = read_regime()
     print(" done")
 
     print("Running EOD scan:")
@@ -1011,9 +1081,9 @@ def main() -> None:
     subject = f"Cardona Bot Journal — {today_label}{tag_str}"
 
     html_body = build_html(today, positions, account, scan_results,
-                           orders, cardona_positions, lessons)
+                           orders, cardona_positions, lessons, regime_data)
     text_body = build_text(today, positions, account, scan_results,
-                           cardona_positions, lessons)
+                           cardona_positions, lessons, regime_data)
 
     if test_mode:
         print(f"\nSubject: {subject}")

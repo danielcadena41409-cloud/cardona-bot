@@ -124,3 +124,18 @@ At every session start, read these files in order:
 3. `memory/cycles.md` — current cycle win/loss tracking
 
 After every closed trade, write a lesson to `memory/lessons.md`.
+
+---
+
+## REGIME INTEGRATION
+
+At the start of every scan, the bot reads `~/trading-agent/data/regime.json` (written by the stock bot's Markov regime detector). The regime governs trade entry behavior for that session.
+
+| Regime | Cardona Action |
+|--------|----------------|
+| **BULL_TRENDING** | Favor call signals. If both CALL and PUT appear on the same symbol, keep only the CALL. |
+| **BEAR_TRENDING** | Favor put signals. If both CALL and PUT appear on the same symbol, keep only the PUT. |
+| **HIGH_VOLATILITY** | Skip all new entries — bot goes silent. Signals are displayed for visibility only. |
+| **SIDEWAYS** | Normal rules apply but drift tolerance tightens from 0.5% → 0.3% (stronger confirmation required). |
+
+The current regime and tomorrow's forecast are printed at the top of every scan output and displayed in the daily EOD email journal. If `regime.json` is missing or unreadable, the bot defaults to SIDEWAYS (safest posture).

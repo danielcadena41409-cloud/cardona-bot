@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Cardona Strategy Scanner — 10-symbol options signal detection on 1H bars."""
 
+import json
 import os
 import re
 import subprocess
@@ -23,6 +24,7 @@ ROUND_RANGE  = 30        # ±$30 around current price
 PROXIMITY    = 0.005     # 0.5% tolerance for "near a level"
 DATA_URL     = "https://data.alpaca.markets/v2"
 LINE         = "─" * 70
+REGIME_FILE  = Path.home() / "trading-agent" / "data" / "regime.json"
 
 
 # ── Environment ───────────────────────────────────────────────────────────────
@@ -329,6 +331,22 @@ def _auto_trade(symbol: str, direction: str, strike: float, expiry: str) -> None
         print(f"    ERROR: {result.stderr.strip()[:200]}")
 
 
+# ── Regime reader ────────────────────────────────────────────────────────────
+
+def _read_regime() -> dict:
+    """Read the Markov regime output. Returns safe SIDEWAYS default if unavailable."""
+    try:
+        if REGIME_FILE.exists():
+            return json.loads(REGIME_FILE.read_text())
+    except Exception:
+        pass
+    return {
+        "current_regime": "SIDEWAYS",
+        "tomorrow_forecast": {"most_likely": "SIDEWAYS"},
+        "bot_instructions": {"cardona": "Normal rules apply."},
+    }
+
+
 # ── Command: scan ─────────────────────────────────────────────────────────────
 
 def cmd_scan() -> None:
@@ -336,6 +354,23 @@ def cmd_scan() -> None:
     print(f"\n{'═' * 70}")
     print(f"  CARDONA STRATEGY SCANNER  |  {ts} ET")
     print(f"{'═' * 70}")
+
+    # ── Regime ───────────────────────────────────────────────────────────────
+    regime_data     = _read_regime()
+    regime          = regime_data.get("current_regime", "SIDEWAYS")
+    tomorrow        = regime_data.get("tomorrow_forecast", {}).get("most_likely", "SIDEWAYS")
+    cardona_rule    = regime_data.get("bot_instructions", {}).get("cardona", "")
+    effective_drift = 0.003 if regime == "SIDEWAYS" else PROXIMITY
+    _regime_icon = {
+        "BULL_TRENDING": "▲ BULL_TRENDING", "BEAR_TRENDING": "▼ BEAR_TRENDING",
+        "HIGH_VOLATILITY": "⚡ HIGH_VOLATILITY", "SIDEWAYS": "↔ SIDEWAYS",
+    }
+    print(f"\n  Regime      : {_regime_icon.get(regime, regime)}")
+    print(f"  Tomorrow    : {_regime_icon.get(tomorrow, tomorrow)}")
+    print(f"  Cardona rule: {cardona_rule}")
+    print(f"  Drift limit : {effective_drift*100:.1f}%")
+    if regime == "HIGH_VOLATILITY":
+        print(f"  ⚡ HIGH VOLATILITY — all auto-trades blocked. Scanning for visibility only.")
 
     for symbol in SYMBOLS:
         bars = fetch_bars(symbol)
@@ -355,6 +390,14 @@ def cmd_scan() -> None:
         res_all = sorted((set(res) | {r for r in rnds if r > price}), reverse=True)
 
         signals = find_signals(bars, sup_all, res_all)
+
+        # Regime signal preference: BULL keeps only CALLs, BEAR keeps only PUTs (when both exist)
+        if regime in ("BULL_TRENDING", "BEAR_TRENDING"):
+            preferred = "CALL" if regime == "BULL_TRENDING" else "PUT"
+            has_call  = any(s["type"] == "CALL" for s in signals)
+            has_put   = any(s["type"] == "PUT"  for s in signals)
+            if has_call and has_put:
+                signals = [s for s in signals if s["type"] == preferred]
 
         print(f"\n{LINE}")
         print(f"  {symbol}  |  ${price:.2f} as of {t_str}  |  Trend: {tr.upper()}")
@@ -421,16 +464,20 @@ def cmd_scan() -> None:
                     print(f"      AUTO      blocked — {warn_m}")
                     continue
 
-                # No-chase: conf close must be within 0.5% of the S/R level
+                if regime == "HIGH_VOLATILITY":
+                    print(f"      AUTO      blocked — HIGH_VOLATILITY regime (all entries paused)")
+                    continue
+
+                # No-chase: conf close must be within drift limit of the S/R level
                 conf_price = s["conf_close"]
                 level      = s["level"]
                 if s["type"] == "CALL":
                     drift = (conf_price - level) / level
                 else:
                     drift = (level - conf_price) / level
-                if drift > PROXIMITY:
+                if drift > effective_drift:
                     print(f"      AUTO      blocked — price drifted "
-                          f"{drift*100:.2f}% past level (max {PROXIMITY*100:.1f}%)")
+                          f"{drift*100:.2f}% past level (max {effective_drift*100:.1f}%)")
                     continue
 
                 if _is_after_cutoff():
