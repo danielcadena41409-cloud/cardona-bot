@@ -22,12 +22,12 @@ These are hard limits enforced in code. The bot will not override them.
 
 ## INSTRUMENTS
 
-**Watchlist (10 symbols):** SPY, QQQ, TSLA, AAPL, NVDA, MSFT, AMZN, META, GOOGL, GLD
+**Watchlist (10 symbols):** SPY, AAPL, AMZN, NVDA, MSFT, GOOGL, GLD, PLTR, JPM, IWM
 
 - Options only (calls and puts) on all 10 symbols
 - Weekly options, maximum 2 weeks to expiration
 - **Strike price:**
-  - SPY and QQQ: approximately 10 points out of the money
+  - SPY: approximately 10 points out of the money
   - All other symbols: approximately 2% out of the money, rounded to nearest $5 strike
 
 ---

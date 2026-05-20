@@ -19,11 +19,11 @@ MAX_POSITIONS = 2
 MAX_EXP_DAYS  = 14
 
 WATCHLIST = {
-    "SPY", "QQQ",                          # index ETFs — 10-pt OTM
-    "TSLA", "AAPL", "NVDA", "MSFT",        # mega-cap tech
-    "AMZN", "META", "GOOGL", "GLD",        # mega-cap + commodity
+    "SPY",                                    # index ETF — 10-pt OTM
+    "AAPL", "AMZN", "NVDA", "MSFT", "GOOGL", # mega-cap tech
+    "GLD", "PLTR", "JPM", "IWM",             # commodity + financials + small-cap ETF
 }
-FIXED_OTM = {"SPY", "QQQ"}                # use flat 10-pt OTM for these two
+FIXED_OTM = {"SPY"}                          # flat 10-pt OTM; all others use 2% OTM
 
 # OCC option symbol: up to 6 letters + 6-digit date (YYMMDD) + C/P + 8-digit strike
 OPTION_RE      = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
@@ -144,7 +144,7 @@ def calc_strike(symbol: str, price: float, direction: str) -> float:
     """
     Suggested OTM strike for the buy command and signal display.
 
-    SPY / QQQ  : flat 10 points OTM (matches the original Cardona rule)
+    SPY        : flat 10 points OTM (matches the original Cardona rule)
     All others : 2% OTM, rounded to the nearest $5 strike increment
                  (stock prices vary too widely for a fixed-point offset)
     """
@@ -179,38 +179,48 @@ def is_option(symbol: str) -> bool:
 
 # ── Options contract search ───────────────────────────────────────────────────
 
-def _fetch_contracts(symbol: str, opt_type: str, exp_target: date) -> list:
+def _find_contract(symbol: str, direction: str, target_strike: float, exp_date: date) -> tuple:
     """
-    Pull contracts for symbol/type within ±3 days of exp_target
-    and within 14 calendar days of today.
+    Construct OCC symbols near target_strike, validate via snapshot.
+    Returns (occ_symbol, ask_price) or (None, None).
+    The /v1beta1/options/contracts endpoint is not available on this subscription.
     """
-    today   = date.today()
-    exp_lo  = max(exp_target - timedelta(days=3), today)
-    exp_hi  = min(exp_target + timedelta(days=3), today + timedelta(days=MAX_EXP_DAYS))
+    increment  = 1.0 if symbol.upper() in FIXED_OTM else 5.0
+    yy = f"{exp_date.year % 100:02d}"
+    mm = f"{exp_date.month:02d}"
+    dd = f"{exp_date.day:02d}"
+    cp = "C" if direction == "call" else "P"
 
-    params   = {
-        "underlying_symbols":  symbol,
-        "type":                opt_type,
-        "expiration_date_gte": exp_lo.isoformat(),
-        "expiration_date_lte": exp_hi.isoformat(),
-        "limit":               1000,
-    }
-    contracts = []
-    while True:
-        data = _data_get("/v1beta1/options/contracts", params)
-        contracts.extend(data.get("option_contracts", []))
-        token = data.get("next_page_token")
-        if not token:
-            break
-        params["page_token"] = token
+    candidates = sorted(set(target_strike + i * increment for i in range(-5, 6)))
+    occ_syms   = [
+        f"{symbol}{yy}{mm}{dd}{cp}{int(round(s * 1000)):08d}"
+        for s in candidates if s > 0
+    ]
+    if not occ_syms:
+        return None, None
 
-    return contracts
+    try:
+        data  = _data_get("/v1beta1/options/snapshots", {"symbols": ",".join(occ_syms)})
+        snaps = data.get("snapshots", {})
+    except SystemExit:
+        return None, None
 
+    best_sym  = None
+    best_ask  = None
+    best_dist = float("inf")
+    for occ_sym, snap in snaps.items():
+        ask = snap.get("latestQuote", {}).get("ap")
+        if not ask or float(ask) <= 0:
+            continue
+        ask           = float(ask)
+        parsed_strike = int(occ_sym[-8:]) / 1000
+        dist          = abs(parsed_strike - target_strike)
+        if dist < best_dist:
+            best_dist = dist
+            best_sym  = occ_sym
+            best_ask  = ask
 
-def _get_snapshot(opt_symbol: str) -> dict:
-    """Return the live snapshot dict for one option symbol, or {}."""
-    data = _data_get("/v1beta1/options/snapshots", {"symbols": opt_symbol})
-    return data.get("snapshots", {}).get(opt_symbol, {})
+    return best_sym, best_ask
 
 
 # ── Market timing ────────────────────────────────────────────────────────────
@@ -240,8 +250,7 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
     """
     Find the best-matching options contract and place a market buy order.
 
-    symbol     : any symbol in WATCHLIST — SPY, QQQ, TSLA, AAPL, NVDA, MSFT,
-                 AMZN, META, GOOGL, GLD
+    symbol     : any symbol in WATCHLIST
     direction  : call or put
     strike     : use calc_strike(symbol, price, direction) for the suggested value
     expiration : YYYY-MM-DD (must be ≤14 days out)
@@ -278,38 +287,23 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
         print(f"SKIP [POSITION_LIMIT]: already {n_cardona} open Cardona positions (max {MAX_POSITIONS})")
         return
 
-    # Search options chain
+    # Find contract via OCC construction + snapshot validation
     print(f"Searching {symbol} {opt_type} contracts near ${strike:.0f} exp {expiration} ...")
-    contracts = _fetch_contracts(symbol, opt_type, exp_date)
+    opt_symbol, ask = _find_contract(symbol.upper(), opt_type, strike, exp_date)
 
-    tradable = [c for c in contracts if c.get("tradable", True)]
-    pool     = tradable if tradable else contracts
-
-    if not pool:
-        print(f"SKIP [NO_CONTRACT]: no {opt_type} contracts found for {symbol} around {expiration}")
+    if not opt_symbol:
+        print(f"SKIP [NO_CONTRACT]: no {opt_type} contracts found for {symbol} near ${strike:.0f} exp {expiration}")
         return
 
-    # Pick best: closest expiration first, then closest strike
-    def _rank(c):
-        d_exp = abs((date.fromisoformat(c["expiration_date"]) - exp_date).days)
-        d_str = abs(float(c["strike_price"]) - strike)
-        return (d_exp, d_str)
-
-    best       = min(pool, key=_rank)
-    opt_symbol = best["symbol"]
-    best_strike = float(best["strike_price"])
-    best_exp    = best["expiration_date"]
+    parsed      = _parse_occ(opt_symbol)
+    best_strike = parsed.get("strike", strike)
+    best_exp    = parsed.get("expiration", expiration)
 
     print(f"  Contract     : {opt_symbol}")
     print(f"  Strike       : ${best_strike:.2f}  (requested ${strike:.0f})")
     print(f"  Expiration   : {best_exp}  (requested {expiration})")
 
-    # Live price check
-    snap = _get_snapshot(opt_symbol)
-    ask  = snap.get("latestQuote", {}).get("ap") if snap else None
-
     if ask and float(ask) > 0:
-        ask  = float(ask)
         cost = ask * 100      # 1 contract = 100 shares
         print(f"  Ask price    : ${ask:.2f}")
         print(f"  Est. cost    : ${cost:.0f}  (1 contract × 100)")
@@ -319,6 +313,7 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
     else:
         print("  Ask price    : unavailable — market may be closed")
         print("  Warning      : budget cannot be verified; proceeding with market order")
+        ask = 0.0
 
     # Market-hours hard block (autonomous rules)
     mins = _mins_to_close()
@@ -340,7 +335,7 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
     print(f"  Strategy     : hold to 100% gain — let losers expire (Cardona rules)")
 
     # Track in local registry so auto_monitor ignores other bots' positions
-    _register_position(opt_symbol, best_exp, ask if ask else 0.0)
+    _register_position(opt_symbol, best_exp, ask)
 
 
 # ── P&L check ─────────────────────────────────────────────────────────────────
@@ -600,20 +595,20 @@ USAGE = """\
 Cardona Trade — options order execution and position management
 Bot is FULLY AUTONOMOUS — trades fire automatically from the scanner.
 
-Watchlist: SPY QQQ TSLA AAPL NVDA MSFT AMZN META GOOGL GLD
+Watchlist: SPY AAPL AMZN NVDA MSFT GOOGL GLD PLTR JPM IWM
 
 Usage:
   python3 scripts/cardona_trade.py status
   python3 scripts/cardona_trade.py monitor
   python3 scripts/cardona_trade.py buy SPY  call 750  2026-05-30
-  python3 scripts/cardona_trade.py buy TSLA call 365  2026-05-30
+  python3 scripts/cardona_trade.py buy AAPL call 205  2026-05-30
   python3 scripts/cardona_trade.py positions
   python3 scripts/cardona_trade.py close <SYMBOL>
 
 Strike guide:
-  SPY / QQQ     ~10 pts OTM  (e.g. SPY at $740 → $750 call or $730 put)
+  SPY           ~10 pts OTM  (e.g. SPY at $740 → $750 call or $730 put)
   All others    ~2% OTM rounded to nearest $5
-                (e.g. TSLA at $350 → $360 call or $340 put)
+                (e.g. AAPL at $200 → $205 call or $195 put)
 
 Commands:
   status                   Market clock + all positions with P&L

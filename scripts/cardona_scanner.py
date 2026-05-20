@@ -12,8 +12,8 @@ from pathlib import Path
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-SYMBOLS      = ["SPY", "QQQ", "TSLA", "AAPL", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "GLD"]
-FIXED_OTM    = {"SPY", "QQQ"}   # 10-point OTM; all others use 2% OTM rounded to $5
+SYMBOLS      = ["SPY", "AAPL", "AMZN", "NVDA", "MSFT", "GOOGL", "GLD", "PLTR", "JPM", "IWM"]
+FIXED_OTM    = {"SPY"}          # 10-point OTM; all others use 2% OTM rounded to $5
 TIMEFRAME    = "1Hour"
 LOOKBACK_DAYS   = 10     # ~70 bars across 7 trading days
 LAST_N_BARS     = 20     # window for S/R analysis
@@ -318,38 +318,39 @@ def _next_expiry(min_days: int = 7, max_days: int = 14) -> str:
     return (today + timedelta(days=max_days)).isoformat()
 
 
-def _has_option_contracts(symbol: str, opt_type: str, expiry: str) -> bool:
+def _has_option_contracts(symbol: str, opt_type: str, strike: float, expiry: str) -> bool:
     """
-    Quick pre-check: does Alpaca have any contracts for symbol/type near expiry?
-    Avoids shelling out to cardona_trade.py when there is nothing to buy.
-    Returns True on API errors to let buy_option handle it gracefully.
+    Quick pre-check using OCC construction + snapshot validation.
+    The /v1beta1/options/contracts endpoint is not available on this subscription.
+    Returns True on errors to let buy_option handle gracefully.
     """
     key    = os.environ.get("APCA_API_KEY_ID", "")
     secret = os.environ.get("APCA_API_SECRET_KEY", "")
     if not key or not secret:
         return True
-    exp_d  = date.fromisoformat(expiry)
-    today  = date.today()
-    exp_lo = max(exp_d - timedelta(days=3), today)
-    exp_hi = min(exp_d + timedelta(days=3), today + timedelta(days=14))
-    hdrs   = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
-    params = {
-        "underlying_symbols":  symbol,
-        "type":                opt_type,
-        "expiration_date_gte": exp_lo.isoformat(),
-        "expiration_date_lte": exp_hi.isoformat(),
-        "limit":               1,
-    }
+    exp_d     = date.fromisoformat(expiry)
+    increment = 1.0 if symbol.upper() in FIXED_OTM else 5.0
+    yy = f"{exp_d.year % 100:02d}"
+    mm = f"{exp_d.month:02d}"
+    dd = f"{exp_d.day:02d}"
+    cp = "C" if opt_type == "call" else "P"
+    candidates = sorted(set(strike + i * increment for i in range(-5, 6)))
+    occ_syms   = [f"{symbol}{yy}{mm}{dd}{cp}{int(round(s * 1000)):08d}"
+                  for s in candidates if s > 0]
+    hdrs = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
     try:
         r = requests.get(
-            "https://data.alpaca.markets/v1beta1/options/contracts",
-            headers=hdrs, params=params, timeout=10,
+            "https://data.alpaca.markets/v1beta1/options/snapshots",
+            headers=hdrs, params={"symbols": ",".join(occ_syms)}, timeout=10,
         )
-        if r.status_code == 404:
-            return False  # Alpaca 404 = no contracts exist in this date range
         if not r.ok:
-            return True   # other errors — let buy_option handle it
-        return len(r.json().get("option_contracts", [])) > 0
+            return True
+        snaps = r.json().get("snapshots", {})
+        return any(
+            snap.get("latestQuote", {}).get("ap") and
+            float(snap["latestQuote"]["ap"]) > 0
+            for snap in snaps.values()
+        )
     except Exception:
         return True
 
@@ -528,9 +529,9 @@ def cmd_scan() -> None:
                 expiry = _next_expiry()
 
                 # Pre-check: verify contracts exist before shelling out to buy_option
-                if not _has_option_contracts(symbol, direction, expiry):
+                if not _has_option_contracts(symbol, direction, strike, expiry):
                     print(f"      SKIP [NO_CONTRACT] — no {direction} contracts for "
-                          f"{symbol} within 14 days on Alpaca paper account")
+                          f"{symbol} near ${strike:.0f} on Alpaca paper account")
                     continue
 
                 print(f"\n    *** AUTO-TRADE FIRING ***")
@@ -628,12 +629,12 @@ def cmd_levels(symbol: str) -> None:
 USAGE = """\
 Cardona Strategy Scanner
 
-Watchlist: SPY QQQ TSLA AAPL NVDA MSFT AMZN META GOOGL GLD
+Watchlist: SPY AAPL AMZN NVDA MSFT GOOGL GLD PLTR JPM IWM
 
 Usage:
   python3 scripts/cardona_scanner.py scan
   python3 scripts/cardona_scanner.py candles SPY
-  python3 scripts/cardona_scanner.py levels  TSLA
+  python3 scripts/cardona_scanner.py levels  GLD
 
 Commands:
   scan          Full signal report for all 10 symbols

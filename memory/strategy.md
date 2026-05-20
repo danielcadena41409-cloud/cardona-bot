@@ -31,17 +31,17 @@ The bot enforces these rules in code before every trade:
 
 | Field | Rule |
 |-------|------|
-| Watchlist | SPY, QQQ, TSLA, AAPL, NVDA, MSFT, AMZN, META, GOOGL, GLD |
+| Watchlist | SPY, AAPL, AMZN, NVDA, MSFT, GOOGL, GLD, PLTR, JPM, IWM |
 | Asset class | Options (calls and puts) on all 10 symbols |
 | Expiration | Weekly options, maximum 2 weeks to expiration |
-| Strike — SPY / QQQ | Approximately **10 points OTM** from current price |
+| Strike — SPY | Approximately **10 points OTM** from current price |
 | Strike — all others | Approximately **2% OTM**, rounded to nearest $5 strike |
 | Contracts | 1 contract per trade |
 | Account | Paper trading only |
 
 **Strike examples:**
 - SPY at $740 → $750 call / $730 put (10 pts)
-- TSLA at $350 → $360 call / $340 put (2% ≈ $7, rounded to $5 increment)
+- IWM at $210 → $215 call / $205 put (2% ≈ $4.20, rounded to $5 increment)
 - NVDA at $130 → $135 call / $125 put (2% ≈ $2.60, rounded to $5 increment)
 - GLD at $310 → $320 call / $305 put (2% ≈ $6.20, rounded to $5 increment)
 
@@ -216,7 +216,7 @@ Always read these three files before any trading session:
 
 | Script | Command | Purpose |
 |--------|---------|---------|
-| `cardona_scanner.py` | `scan` | Full signal report for SPY and QQQ |
+| `cardona_scanner.py` | `scan` | Full signal report for all 10 watchlist symbols |
 | `cardona_scanner.py` | `candles SPY` | Last 10 bars with pattern markers |
 | `cardona_scanner.py` | `levels SPY` | S/R levels and round numbers |
 | `cardona_trade.py` | `status` | Market clock, positions, P&L |
@@ -254,7 +254,7 @@ Regime + tomorrow forecast are shown at the top of every scan output and in the 
 
 ## HARD RULES — NEVER VIOLATE
 
-1. SPY and QQQ options only
+1. Watchlist symbols only — SPY, AAPL, AMZN, NVDA, MSFT, GOOGL, GLD, PLTR, JPM, IWM
 2. 1-hour candles only for all analysis
 3. No trade when trend is sideways
 4. No trade without confirmation candle
