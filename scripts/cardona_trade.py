@@ -265,17 +265,17 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
 
     days_out = (exp_date - today).days
     if days_out < 0:
-        print(f"SKIP: expiration {expiration} is in the past")
+        print(f"SKIP [TIME_BLOCK]: expiration {expiration} is in the past")
         return
     if days_out > MAX_EXP_DAYS:
-        print(f"SKIP: {expiration} is {days_out} days out — max {MAX_EXP_DAYS}")
+        print(f"SKIP [TIME_BLOCK]: {expiration} is {days_out} days out — max {MAX_EXP_DAYS}")
         return
 
     # Enforce position limit — count only Cardona's own tracked positions
     cardona_positions = _load_cardona_positions()
     n_cardona = len(cardona_positions)
     if n_cardona >= MAX_POSITIONS:
-        print(f"SKIP: already {n_cardona} open Cardona positions (max {MAX_POSITIONS})")
+        print(f"SKIP [POSITION_LIMIT]: already {n_cardona} open Cardona positions (max {MAX_POSITIONS})")
         return
 
     # Search options chain
@@ -286,7 +286,7 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
     pool     = tradable if tradable else contracts
 
     if not pool:
-        print(f"SKIP: no {opt_type} contracts found for {symbol} around {expiration}")
+        print(f"SKIP [NO_CONTRACT]: no {opt_type} contracts found for {symbol} around {expiration}")
         return
 
     # Pick best: closest expiration first, then closest strike
@@ -314,7 +314,7 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
         print(f"  Ask price    : ${ask:.2f}")
         print(f"  Est. cost    : ${cost:.0f}  (1 contract × 100)")
         if cost > MAX_BUDGET:
-            print(f"SKIP: est. cost ${cost:.0f} exceeds ${MAX_BUDGET:.0f} budget")
+            print(f"SKIP [BUDGET_EXCEEDED]: est. cost ${cost:.0f} exceeds ${MAX_BUDGET:.0f} budget")
             return
     else:
         print("  Ask price    : unavailable — market may be closed")
@@ -323,10 +323,10 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
     # Market-hours hard block (autonomous rules)
     mins = _mins_to_close()
     if mins < 0:
-        print("SKIP: market is currently CLOSED — no autonomous trades outside hours")
+        print("SKIP [TIME_BLOCK]: market is currently CLOSED — no autonomous trades outside hours")
         return
     if mins <= 30:
-        print(f"SKIP: {mins:.0f} min until close — no trades in last 30 min of session")
+        print(f"SKIP [TIME_BLOCK]: {mins:.0f} min until close — no trades in last 30 min of session")
         return
     print(f"  Market       : OPEN  ({mins:.0f} min remaining)")
 

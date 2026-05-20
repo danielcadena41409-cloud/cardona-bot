@@ -318,6 +318,42 @@ def _next_expiry(min_days: int = 7, max_days: int = 14) -> str:
     return (today + timedelta(days=max_days)).isoformat()
 
 
+def _has_option_contracts(symbol: str, opt_type: str, expiry: str) -> bool:
+    """
+    Quick pre-check: does Alpaca have any contracts for symbol/type near expiry?
+    Avoids shelling out to cardona_trade.py when there is nothing to buy.
+    Returns True on API errors to let buy_option handle it gracefully.
+    """
+    key    = os.environ.get("APCA_API_KEY_ID", "")
+    secret = os.environ.get("APCA_API_SECRET_KEY", "")
+    if not key or not secret:
+        return True
+    exp_d  = date.fromisoformat(expiry)
+    today  = date.today()
+    exp_lo = max(exp_d - timedelta(days=3), today)
+    exp_hi = min(exp_d + timedelta(days=3), today + timedelta(days=14))
+    hdrs   = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+    params = {
+        "underlying_symbols":  symbol,
+        "type":                opt_type,
+        "expiration_date_gte": exp_lo.isoformat(),
+        "expiration_date_lte": exp_hi.isoformat(),
+        "limit":               1,
+    }
+    try:
+        r = requests.get(
+            "https://data.alpaca.markets/v1beta1/options/contracts",
+            headers=hdrs, params=params, timeout=10,
+        )
+        if r.status_code == 404:
+            return False  # Alpaca 404 = no contracts exist in this date range
+        if not r.ok:
+            return True   # other errors — let buy_option handle it
+        return len(r.json().get("option_contracts", [])) > 0
+    except Exception:
+        return True
+
+
 def _auto_trade(symbol: str, direction: str, strike: float, expiry: str) -> None:
     """Call cardona_trade.py buy via subprocess and print its output."""
     script = Path(__file__).parent / "cardona_trade.py"
@@ -458,14 +494,15 @@ def cmd_scan() -> None:
                 if not s["confirmed"]:
                     continue
                 if s["conf_time"] != latest_bar_time:
-                    print(f"      AUTO      stale signal — skipping")
+                    print(f"      SKIP [STALE_SIGNAL] — confirmed on "
+                          f"{s['conf_time'][:16]}, latest bar is {latest_bar_time[:16]}")
                     continue
                 if warn:
-                    print(f"      AUTO      blocked — {warn_m}")
+                    print(f"      SKIP [TREND_MISMATCH] — {warn_m}")
                     continue
 
                 if regime == "HIGH_VOLATILITY":
-                    print(f"      AUTO      blocked — HIGH_VOLATILITY regime (all entries paused)")
+                    print(f"      SKIP [REGIME_BLOCK] — HIGH_VOLATILITY regime (all entries paused)")
                     continue
 
                 # No-chase: conf close must be within drift limit of the S/R level
@@ -476,19 +513,26 @@ def cmd_scan() -> None:
                 else:
                     drift = (level - conf_price) / level
                 if drift > effective_drift:
-                    print(f"      AUTO      blocked — price drifted "
+                    print(f"      SKIP [DRIFT_EXCEEDED] — price drifted "
                           f"{drift*100:.2f}% past level (max {effective_drift*100:.1f}%)")
                     continue
 
                 if _is_after_cutoff():
-                    print(f"      AUTO      blocked — after 3:30 PM ET cutoff")
+                    print(f"      SKIP [TIME_BLOCK] — after 3:30 PM ET cutoff")
                     continue
 
                 if _is_earnings_day(symbol):
-                    print(f"      AUTO      blocked — {symbol} has earnings today")
+                    print(f"      SKIP [EARNINGS_BLOCK] — {symbol} has earnings today")
                     continue
 
                 expiry = _next_expiry()
+
+                # Pre-check: verify contracts exist before shelling out to buy_option
+                if not _has_option_contracts(symbol, direction, expiry):
+                    print(f"      SKIP [NO_CONTRACT] — no {direction} contracts for "
+                          f"{symbol} within 14 days on Alpaca paper account")
+                    continue
+
                 print(f"\n    *** AUTO-TRADE FIRING ***")
                 print(f"    {symbol} {s['type']} ${strike:.0f} exp {expiry}")
                 _auto_trade(symbol, direction, strike, expiry)
