@@ -17,8 +17,8 @@ SENDGRID_URL = "https://api.sendgrid.com/v3/mail/send"
 OPTION_RE    = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
 TP_THRESHOLD = 0.90
 
-SYMBOLS   = ["SPY", "QQQ", "TSLA", "AAPL", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "GLD"]
-FIXED_OTM = {"SPY", "QQQ"}
+SYMBOLS   = ["SPY", "AAPL", "AMZN", "NVDA", "MSFT", "GOOGL", "GLD", "PLTR", "JPM", "IWM"]
+FIXED_OTM = {"SPY"}
 WATCHLIST = set(SYMBOLS)
 
 TIMEFRAME    = "1Hour"
@@ -464,7 +464,7 @@ def _generate_self_eval(scan_results: list, cardona_positions: dict,
         lines3.append("Sideways symbols — wait for trend to resolve: "
                       + ", ".join(trend_parts[:3]) + ".")
     lines3.append(
-        "SPY and QQQ trend direction at the open sets the session bias. "
+        "SPY trend direction at the open sets the session bias. "
         "Calls only in uptrend, puts only in downtrend, sit out sideways."
     )
     regime_notes = {
