@@ -7,6 +7,7 @@ Scans every 15 min · monitors positions every 5 min · EOD journal at 4:15 PM E
 Usage:
     python3 scripts/live_trader.py
     python3 scripts/live_trader.py --no-screen   # flat output (tmux / nohup)
+    python3 scripts/live_trader.py --test        # one scan cycle, dry-run, exit
 """
 
 import json
@@ -65,6 +66,7 @@ LOG_DIR       = _ROOT / "logs"
 REGIME_FILE   = Path.home() / "trading-agent" / "data" / "regime.json"
 
 SCREEN_MODE   = "--no-screen" not in sys.argv
+TEST_MODE     = "--test"      in sys.argv
 
 # ── ET time helpers ───────────────────────────────────────────────────────────
 
@@ -302,9 +304,9 @@ def run_scan(state: BotState) -> None:
                 result_str  = f"SKIP [DRIFT_EXCEEDED] {drift*100:.2f}% > {drift_limit*100:.1f}%"
                 continue
 
-            # Time gate
+            # Time gate (skipped in --test mode)
             now_hm = (et_now().hour, et_now().minute)
-            if now_hm >= SESSION_END:
+            if not TEST_MODE and now_hm >= SESSION_END:
                 best_signal = s
                 result_str  = "SKIP [TIME_BLOCK] past 3:30 PM"
                 continue
@@ -355,6 +357,10 @@ def run_scan(state: BotState) -> None:
 
 def _exec_buy(symbol: str, direction: str, strike: float,
               expiry: str, state: BotState) -> None:
+    if TEST_MODE:
+        state.log(f"DRY RUN — {symbol} {direction.upper()} ${strike:.0f} "
+                  f"exp {expiry} (--test: no order sent)", "WARN")
+        return
     cmd = [sys.executable, str(_SCRIPTS / "cardona_trade.py"),
            "buy", symbol, direction, f"{strike:.0f}", expiry]
     try:
@@ -849,9 +855,133 @@ class CardonaLiveTrader:
         st.log("Bot shutdown complete")
 
 
+# ── Test mode ─────────────────────────────────────────────────────────────────
+
+def run_test() -> None:
+    """
+    --test: one full scan cycle, dry-run (no orders), then exit.
+    Prints a pass/fail checklist covering all critical subsystems.
+    """
+    console = Console()
+    console.rule("[bold cyan]CARDONA LIVE TRADER — TEST MODE[/bold cyan]")
+    console.print()
+
+    checks: list[tuple[str, bool, str]] = []   # (label, passed, detail)
+
+    def chk(label: str, passed: bool, detail: str = "") -> None:
+        checks.append((label, passed, detail))
+        icon  = "[bold bright_green]PASS[/]" if passed else "[bold bright_red]FAIL[/]"
+        extra = f"  [dim]{detail}[/dim]" if detail else ""
+        console.print(f"  [{icon}]  {label}{extra}")
+
+    # ── 1. Imports ────────────────────────────────────────────────────────────
+    chk("Imports (rich, requests, cardona_scanner, cardona_trade)",
+        True, "already loaded")
+
+    # ── 2. Load .env + scanner constants ─────────────────────────────────────
+    try:
+        _cs.load_env()
+        key = os.environ.get("APCA_API_KEY_ID", "")
+        chk("load_env / API key present", bool(key),
+            f"key={'*' * 4 + key[-4:] if len(key) >= 4 else 'MISSING'}")
+    except Exception as e:
+        chk("load_env / API key present", False, str(e))
+
+    # ── 3. Alpaca account fetch ───────────────────────────────────────────────
+    try:
+        acct = _safe_account()
+        eq   = float(acct.get("equity", 0)) if acct else 0
+        chk("Alpaca API — account fetch", eq > 0,
+            f"equity=${eq:,.2f}" if eq else "equity=0 (check credentials)")
+    except Exception as e:
+        chk("Alpaca API — account fetch", False, str(e))
+
+    # ── 4. Regime file ────────────────────────────────────────────────────────
+    try:
+        regime_data = _cs._read_regime()
+        regime      = regime_data.get("current_regime", "")
+        src         = "file" if REGIME_FILE.exists() else "default (file missing)"
+        chk("Regime file read", bool(regime),
+            f"{regime} [{src}]  path={REGIME_FILE}")
+    except Exception as e:
+        chk("Regime file read", False, str(e))
+
+    # ── 5. Memory files ───────────────────────────────────────────────────────
+    for fname in ("strategy.md", "lessons.md", "cycles.md"):
+        p = MEM_DIR / fname
+        try:
+            txt = p.read_text() if p.exists() else ""
+            chk(f"Memory file: {fname}", p.exists(),
+                f"{len(txt)} chars" if p.exists() else "missing (will be created on first trade)")
+        except Exception as e:
+            chk(f"Memory file: {fname}", False, str(e))
+
+    # ── 6. cardona_positions.json ─────────────────────────────────────────────
+    try:
+        pos = _ct._load_cardona_positions()
+        chk("cardona_positions.json",
+            True, f"{len(pos)} position(s) — path={POS_FILE}")
+    except Exception as e:
+        chk("cardona_positions.json", False, str(e))
+
+    # ── 7. Full 10-symbol scan ────────────────────────────────────────────────
+    console.print()
+    console.print("  [dim]Running full scan of all 10 symbols (dry-run)…[/dim]")
+    state = BotState()
+    state.status = "ACTIVE"
+    scan_ok = False
+    try:
+        run_scan(state)
+        got_syms = {r["symbol"] for r in state.scan_rows}
+        missing  = set(SYMBOLS) - got_syms
+        scan_ok  = len(state.scan_rows) == len(SYMBOLS) and not missing
+        chk(f"Scan — all {len(SYMBOLS)} symbols returned",
+            scan_ok,
+            f"{len(state.scan_rows)}/{len(SYMBOLS)} rows" +
+            (f", missing: {missing}" if missing else ""))
+    except Exception as e:
+        chk(f"Scan — all {len(SYMBOLS)} symbols returned", False, str(e))
+        _flog(f"Test scan error: {traceback.format_exc()}", "ERROR")
+
+    # count signal types
+    n_sig  = sum(1 for r in state.scan_rows if r.get("signal"))
+    n_fire = sum(1 for r in state.scan_rows if "FIRING" in r.get("result", ""))
+    console.print(f"  [dim]Signals found: {n_sig}  |  Would fire (dry-run): {n_fire}[/dim]")
+
+    # ── 8. Rich display render ────────────────────────────────────────────────
+    try:
+        refresh_account(state)
+        rendered = _render(state)
+        console.print()
+        console.print(rendered)
+        chk("Rich display render", True, "all panels rendered without error")
+    except Exception as e:
+        chk("Rich display render", False, str(e))
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    console.print()
+    total  = len(checks)
+    passed = sum(1 for _, ok, _ in checks if ok)
+    failed = total - passed
+    color  = "bright_green" if failed == 0 else "bright_red"
+    console.rule(f"[bold {color}]TEST RESULT: {passed}/{total} checks passed[/bold {color}]")
+
+    if failed:
+        console.print("\n  [bright_red]Failed checks:[/bright_red]")
+        for label, ok, detail in checks:
+            if not ok:
+                console.print(f"    [bright_red]✗[/bright_red]  {label}"
+                               + (f"  — {detail}" if detail else ""))
+
+    console.print()
+    sys.exit(0 if failed == 0 else 1)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
+    if TEST_MODE:
+        run_test()
     CardonaLiveTrader().run()
 
 
