@@ -176,12 +176,16 @@ def _append_trade_lesson(meta: dict, pl_pct: float) -> None:
 
 # ── Safe API wrappers ─────────────────────────────────────────────────────────
 
+_BAR_RETRY_WAITS = [2, 5, 10]   # short — bar data isn't order-critical
+
 def _safe_bars(symbol: str) -> list:
-    for i, wait in enumerate(RETRY_WAITS):
+    for i, wait in enumerate(_BAR_RETRY_WAITS):
         try:
             return _cs.fetch_bars(symbol)
         except (SystemExit, Exception) as e:
-            if i < MAX_RETRIES - 1:
+            err = str(e)
+            _flog(f"fetch_bars {symbol} attempt {i+1}/{len(_BAR_RETRY_WAITS)}: {err[:120]}", "WARN")
+            if i < len(_BAR_RETRY_WAITS) - 1:
                 time.sleep(wait)
     return []
 
@@ -237,13 +241,25 @@ def run_scan(state: BotState) -> None:
         state.log("Scan — HIGH_VOLATILITY: visibility only, no entries", "WARN")
 
     rows = []
+    consecutive_failures = 0
     for symbol in SYMBOLS:
         bars = _safe_bars(symbol)
         if not bars:
+            consecutive_failures += 1
             rows.append({"symbol": symbol, "price": 0, "trend": "?",
                          "signal": None, "result": "ERROR: no data"})
             state.log(f"{symbol}: no bar data", "WARN")
+            if consecutive_failures >= 3:
+                state.log(
+                    "API_DOWN — 3 consecutive failures, aborting scan; "
+                    "retry in 2 min", "ERROR"
+                )
+                state.next_scan = et_now() + timedelta(minutes=2)
+                state.scan_rows = rows
+                state.last_scan = et_now()
+                return
             continue
+        consecutive_failures = 0
 
         price       = bars[-1]["c"]
         trend       = _cs.market_trend(bars)
