@@ -333,11 +333,16 @@ def run_scan(state: BotState) -> None:
                 result_str  = "SKIP [EARNINGS_BLOCK]"
                 continue
 
-            # Position limit (read fresh each iteration)
-            n_pos = len(_ct._load_cardona_positions())
+            # Position limit + no re-entry into same symbol (read fresh)
+            cardona_pos = _ct._load_cardona_positions()
+            n_pos = len(cardona_pos)
             if n_pos >= MAX_POSITIONS:
                 best_signal = s
                 result_str  = f"SKIP [POSITION_LIMIT] {n_pos}/2"
+                continue
+            if any(occ.upper().startswith(symbol.upper()) for occ in cardona_pos):
+                best_signal = s
+                result_str  = "SKIP [ALREADY_HELD]"
                 continue
 
             # Contract availability
