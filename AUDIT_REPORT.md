@@ -1,95 +1,128 @@
 # Cardona Bot — Bug Audit Report
 
-**Date:** 2026-05-30  
-**Scope:** `scripts/live_trader.py`, `scripts/cardona_scanner.py`,
-`scripts/cardona_trade.py`, `scripts/notify.py`  
-**Method:** Full manual code review across all 9 bug categories; all bugs fixed
-and verified with `py_compile` before committing.
+**Date:** 2026-05-30
+**Scope:** `scripts/live_trader.py` and all files it imports
+         (`cardona_scanner.py`, `cardona_trade.py`, `notify.py`)
+**Status:** All 12 bugs found and fixed. Committed to main.
 
 ---
 
-## Bugs Found and Fixed
+## Summary
 
-### BUG-01 — Win/Loss Logging Always Records "LOSS" (CRITICAL)
-**File:** `scripts/live_trader.py` — `_append_trade_lesson()`  
-**Category:** Profit target bug / math error  
-**Severity:** Critical  
+| # | Severity | Category | File | Description |
+|---|----------|----------|------|-------------|
+| 01 | CRITICAL | Math Error | `live_trader.py` | WIN threshold used 1.0 — every auto-close logged as LOSS |
+| 02 | CRITICAL | Crash/Reconnect | `live_trader.py` | EOD journal never resent after day 1 of a multi-day run |
+| 03 | CRITICAL | Order Placement | `live_trader.py` | `_exec_close` swallowed errors; lesson logged on failed close |
+| 04 | CRITICAL | Order Placement | `cardona_trade.py` | Buy proceeded when clock API returned unknown market status |
+| 05 | CRITICAL | Order Placement | `cardona_trade.py` | Buy proceeded with ask=0, bypassing $200 budget check |
+| 06 | CRITICAL | Stale Data | `live_trader.py` | `past_session()` had no weekday guard — monitor ran on weekends |
+| 07 | CRITICAL | Edge Case | `cardona_scanner.py` | `_is_after_cutoff()` fired 1h early in winter (EST vs EDT) |
+| 08 | CRITICAL | Crash/Reconnect | `live_trader.py` | Error count never reset — permanent ERROR after 5 transient failures |
+| 09 | CRITICAL | Position Tracking | `live_trader.py` + `cardona_trade.py` | Expired/orphaned positions never cleaned from registry |
+| 10 | IMPORTANT | Edge Case/Display | `live_trader.py` | Circuit breaker left up to 7 symbols missing from scan panel |
+| 11 | MINOR | HTML Injection | `notify.py` | Lesson text inserted raw into HTML email without escaping |
+| 12 | IMPORTANT | Math/Division by Zero | `cardona_scanner.py` + `notify.py` | `round_number_levels` could generate 0/negative levels |
 
-**Root cause:**  
+---
+
+## Bug Details
+
+---
+
+### BUG-01 — CRITICAL — WIN threshold wrong in `_append_trade_lesson`
+**File:** `live_trader.py:_append_trade_lesson`
+**Category:** Math Error
+
+**Problem:**
 ```python
-# BEFORE (wrong)
 result = "WIN" if pl_pct >= 1.0 else "LOSS"
 ```
-`pl_pct` is a decimal fraction (`0.90` = 90%). The take-profit fires at
-`TP_THRESHOLD = 0.90`. Because `0.90 >= 1.0` is always False, every
-auto-closed trade was written to `lessons.md` as **LOSS**, corrupting cycle
-tracking and the EOD self-evaluation answers.
+`pl_pct` is the Alpaca `unrealized_plpc` fraction (e.g., 0.90 for 90% gain). The strategy
+auto-closes at 90% gain (`TP_THRESHOLD = 0.90`). Since 0.90 < 1.0, every take-profit closure
+was recorded as a "LOSS" in `lessons.md`. The cycle tracker, EOD self-evaluation, and win rate
+statistics were all wrong.
 
-**Fix:**  
+**Fix:**
 ```python
 result = "WIN" if pl_pct >= TP_THRESHOLD else "LOSS"
 ```
 
 ---
 
-### BUG-02 — EOD Journal Only Sent Once Per Bot Lifetime (HIGH)
-**File:** `scripts/live_trader.py` — `BotState`, `run_eod()`, main loop  
-**Category:** Crash / reconnect bug  
-**Severity:** High  
+### BUG-02 — CRITICAL — EOD journal only sent once in a multi-day session
+**File:** `live_trader.py`
+**Category:** Crash/Reconnect
 
-**Root cause:**  
-`eod_sent` was a simple boolean set to `True` after the first EOD send and
-never reset. A bot running continuously from Monday through Friday would send
-Monday's EOD journal but silently skip Tuesday–Friday.
+**Problem:** `st.eod_sent` was a plain bool, never reset. In a long-running session that spans
+multiple trading days (the bot is designed to run continuously), `eod_sent` would be `True` after
+the first EOD journal at 4:15 PM on day 1. The check `not st.eod_sent` would block the EOD journal
+from firing on every subsequent day, meaning days 2+ had no EOD email.
 
-**Fix:**  
-Added `eod_sent_date: date | None` to `BotState`. `run_eod()` now stamps
-`state.eod_sent_date = et_now().date()`. The main-loop trigger changed from
-`not st.eod_sent` to `st.eod_sent_date != et_now().date()`, firing once per
-calendar day.
+**Fix:** Replaced `eod_sent: bool` with `eod_sent_date: date | None`. The gate now checks
+`st.eod_sent_date != et_now().date()` instead of `not st.eod_sent`, resetting automatically at
+midnight when the date changes.
 
----
-
-### BUG-03 — Close-Order Failures Are Invisible (HIGH)
-**File:** `scripts/live_trader.py` — `_exec_close()`  
-**Category:** Stop loss / order placement bug  
-**Severity:** High  
-
-**Root cause:**  
-`_exec_close()` captured `stdout` from the subprocess but never checked
-`returncode` or logged `stderr`. When `cardona_trade.py close` failed (network
-error, Alpaca 4xx, etc.) the subprocess exited non-zero and wrote the error to
-stderr, which was silently discarded. Additionally, the take-profit block
-unconditionally called `del enriched[occ_sym]` regardless of whether the close
-succeeded, causing the position to vanish from the display even on failure.
-
-**Fix:**  
-`_exec_close()` now returns a `bool`. Added return-code + stderr logging and a
-`TimeoutExpired` handler. The take-profit block only removes the position from
-`enriched` (and writes the lesson) when the close subprocess exits 0:
 ```python
-if _exec_close(occ_sym, state):
-    _append_trade_lesson(meta, pl_pct)
-    del enriched[occ_sym]
-    ...
-# If close failed, keep in enriched so it retries next monitor cycle.
+# Before
+if in_eod_window() and not st.eod_sent:
+    run_eod(st)
+
+# After
+if in_eod_window() and st.eod_sent_date != et_now().date():
+    run_eod(st)
 ```
 
 ---
 
-### BUG-04 — Order Placed When Clock API Fails (CRITICAL)
-**File:** `scripts/cardona_trade.py` — `buy_option()`  
-**Category:** Order placement bug  
-**Severity:** Critical  
+### BUG-03 — CRITICAL — `_exec_close` swallowed errors; lesson logged on failed close
+**File:** `live_trader.py:_exec_close` and `run_monitor`
+**Category:** Order Placement / Profit Target
 
-**Root cause:**  
-`_mins_to_close()` returns `float("inf")` when the Alpaca clock API call
-raises `SystemExit` (network failure). The existing guards checked only
-`mins < 0` (closed) and `mins <= 30` (near close). `float("inf")` satisfies
-neither condition, so the bot would proceed to place a buy order without
-knowing whether the market was open.
+**Problem (A):** `_exec_close` returned `None`. `run_monitor` unconditionally called
+`_append_trade_lesson` and `del enriched[occ_sym]` regardless of close success.
+If the API rejected the close or the subprocess crashed, the lesson would record a
+false "closed" event while the position still existed on Alpaca and in `cardona_positions.json`.
 
-**Fix:**  
+**Problem (B):** Close failures were logged at "WARN" level, not "ERROR".
+`subprocess.TimeoutExpired` fell into the bare `except Exception` without a specific message.
+
+**Fix:** Changed return type to `bool`. Lesson and deletion only happen on `True`.
+Added explicit `TimeoutExpired` handler. Failures logged at ERROR level.
+
+```python
+def _exec_close(occ_sym: str, state: BotState) -> bool:
+    ...
+    if r.returncode != 0:
+        state.log(f"  ERR: {r.stderr.strip()[:200]}", "ERROR")
+        return False
+    return True
+
+# In run_monitor:
+if _exec_close(occ_sym, state):
+    _append_trade_lesson(meta, pl_pct)
+    del enriched[occ_sym]
+```
+
+---
+
+### BUG-04 — CRITICAL — `buy_option` placed orders when clock API status was unknown
+**File:** `cardona_trade.py:buy_option`
+**Category:** Order Placement
+
+**Problem:** `_mins_to_close()` returns `float("inf")` when the Alpaca clock API fails.
+The original check was:
+```python
+if mins < 0:
+    return  # closed
+if mins <= 30:
+    return  # last 30 min
+```
+`float("inf")` fails both conditions, so the buy proceeded with market status unknown.
+Orders placed during a closed market (or on a holiday) would be rejected by Alpaca but still
+consume a position slot in the registry (since `_register_position` was called after `_trade_post`).
+
+**Fix:**
 ```python
 if not (0 < mins < float("inf")):
     print("SKIP [TIME_BLOCK]: market status unknown (clock API error) — skipping to be safe")
@@ -98,39 +131,46 @@ if not (0 < mins < float("inf")):
 
 ---
 
-### BUG-05 — Order Placed When Ask Price Is Zero — Budget Bypass (CRITICAL)
-**File:** `scripts/cardona_trade.py` — `buy_option()`  
-**Category:** Order placement bug / math error  
-**Severity:** Critical  
+### BUG-05 — CRITICAL — `buy_option` bypassed $200 budget check when ask was unavailable
+**File:** `cardona_trade.py:buy_option`
+**Category:** Order Placement
 
-**Root cause:**  
-When the options snapshot returned an ask of 0 or null, `buy_option()` logged
-a warning, set `ask = 0.0`, then continued. The $200 budget check was skipped
-entirely (cost = 0 × 100 = $0). The market order was placed at an unknown cost
-that could exceed the $200 limit. Additionally `ask = 0.0` was stored as
-`entry_price_estimate`, making all subsequent P&L calculations show 0%.
-
-**Fix:**  
-Replaced the `ask = 0.0` branch with an early return:
+**Problem:** When the options snapshot returned no ask price (`ask = None` or `ask = 0`),
+the old code set `ask = 0.0` and printed a warning but still proceeded:
 ```python
-print("SKIP [NO_PRICE]: ask price unavailable — cannot verify $200 budget limit")
-return
+else:
+    print("  Warning: budget cannot be verified; proceeding with market order")
+    ask = 0.0
+```
+A market order was then placed with no price validation. The actual fill could be any amount,
+violating the $200 maximum per trade rule. The position was also registered with
+`entry_price_estimate = 0.0`, making all P&L calculations wrong for that position.
+
+**Fix:**
+```python
+else:
+    print("SKIP [NO_PRICE]: ask price unavailable — cannot verify $200 budget limit")
+    return
 ```
 
 ---
 
-### BUG-06 — Position Monitor Runs on Weekends, Can Try to Auto-Close (HIGH)
-**File:** `scripts/live_trader.py` — `past_session()`  
-**Category:** Edge case  
-**Severity:** High  
+### BUG-06 — CRITICAL — `past_session()` had no weekday guard — monitor ran on weekends
+**File:** `live_trader.py:past_session`
+**Category:** Stale Data
 
-**Root cause:**  
-`past_session()` checked only `(hour, minute) >= (15, 30)` with no weekday
-guard. On Saturday or Sunday after 3:30 PM ET, `past_session()` returned
-`True`, causing the main loop to run `run_monitor()`. If any position showed
-≥ 90% P&L (from Friday's stale Alpaca data), `_exec_close()` would fire.
+**Problem:**
+```python
+def past_session() -> bool:
+    t = et_now()
+    return (t.hour, t.minute) >= SESSION_END
+```
+On Saturdays and Sundays, any time after 3:30 PM ET returned `True`. The main loop then ran
+`run_monitor()` every 5 minutes all weekend. The monitor called `_safe_positions()` (API cost)
+and `_safe_snapshot()` per position with stale Friday prices — the bid price of an expired option
+would be 0, potentially triggering incorrect P&L calculations or false orphan cleanups.
 
-**Fix:**  
+**Fix:**
 ```python
 def past_session() -> bool:
     t = et_now()
@@ -141,159 +181,154 @@ def past_session() -> bool:
 
 ---
 
-### BUG-07 — UTC-Based Trade Cutoff Wrong in Winter (EST) (MEDIUM)
-**File:** `scripts/cardona_scanner.py` — `_is_after_cutoff()`  
-**Category:** Edge case  
-**Severity:** Medium  
+### BUG-07 — IMPORTANT — `_is_after_cutoff()` fired 1 hour early in winter (EST)
+**File:** `cardona_scanner.py:_is_after_cutoff`
+**Category:** Edge Case / Wrong Time Gate
 
-**Root cause:**  
-The cutoff was hard-coded to `19:30 UTC`, which equals `3:30 PM EDT` (UTC-4,
-summer only). In winter (EST = UTC-5) `3:30 PM ET` = `20:30 UTC`, so the check
-triggered at `19:30 UTC` = `2:30 PM ET`, blocking 1 full trading hour early.
-
-**Fix (applied prior to this audit session, confirmed correct):**  
+**Problem:** The function used a hardcoded UTC comparison:
 ```python
-def _is_after_cutoff() -> bool:
-    from zoneinfo import ZoneInfo
-    et = datetime.now(ZoneInfo("America/New_York"))
-    return (et.hour, et.minute) >= (15, 30)
+return utc.hour > 19 or (utc.hour == 19 and utc.minute >= 30)
+# "3:30 PM EDT = 19:30 UTC"
+```
+Correct in summer (EDT = UTC−4). In winter (EST = UTC−5), 3:30 PM ET = 20:30 UTC.
+The cutoff fired at 2:30 PM ET all winter, blocking the last hour of valid trading.
+Used by the standalone scanner (`cmd_scan`). `live_trader.py` was not affected (it
+already used `ZoneInfo("America/New_York")` for its own time gates).
+
+**Fix:**
+```python
+now_et = datetime.now(ZoneInfo("America/New_York"))
+return (now_et.hour, now_et.minute) >= (15, 30)
 ```
 
 ---
 
-### BUG-08 — `error_count` Never Resets; Permanent ERROR Status After 5 Total Errors (MEDIUM)
-**File:** `scripts/live_trader.py` — main loop  
-**Category:** Crash / reconnect bug  
-**Severity:** Medium  
+### BUG-08 — CRITICAL — Error count never reset; permanent ERROR after 5 transient failures
+**File:** `live_trader.py` main loop
+**Category:** Crash/Reconnect
 
-**Root cause:**  
-`error_count` was only ever incremented. Five transient errors spread over
-multiple days would accumulate to `MAX_RETRIES = 5`, permanently setting
-`state.status = "ERROR"`. The bot kept running but the ERROR status was
-misleading and would persist even after hours of clean operation.
+**Problem:** `st.error_count` incremented on every exception but was never decremented or reset
+on a successful iteration. `MAX_RETRIES = 5`. Five transient API timeouts spread over a single
+trading day permanently set `st.status = "ERROR"`, misleading the operator.
 
-**Fix:**  
-At the end of every clean loop iteration, reset the counter and restore status:
+**Fix:** Reset at the end of each clean loop iteration:
 ```python
 if st.error_count > 0:
     st.error_count = 0
     if st.status == "ERROR":
         st.status = "ACTIVE" if in_session() else "MARKET_CLOSED"
 ```
+ERROR status now only persists through a genuine crash loop (5+ back-to-back exceptions).
 
 ---
 
-### BUG-09 — Orphaned / Expired Positions Permanently Block Trade Slots (HIGH)
-**File:** `scripts/live_trader.py` — `run_monitor()` ; `scripts/cardona_trade.py` — `close_position()`  
-**Category:** Position tracking bug  
-**Severity:** High  
+### BUG-09 — CRITICAL — Expired/orphaned positions never removed from registry
+**Files:** `live_trader.py:run_monitor`, `cardona_trade.py:close_position`
+**Category:** Position Tracking
 
-**Root cause:**  
-If a position expired worthless, was manually closed in the Alpaca UI, or was
-never filled (e.g., order rejected), it would remain in `cardona_positions.json`
-indefinitely. Every monitor run would find no matching Alpaca entry, silently
-skip it (no cleanup), and the 2-position slot remained permanently occupied,
-preventing any new auto-trades.
+**Problem:** Three separate code paths all failed to clean up `cardona_positions.json`:
 
-**Fix (two-pronged):**  
+1. **Expired worthless (DTE < 0):** `run_monitor` found `ap = None`, fell through to snapshot
+   (bid=0, P&L=−100%), TP check failed (−1.0 < 0.90), and nothing was cleaned up.
+2. **Externally closed (DTE ≥ 0, not on Alpaca):** Same as above — no cleanup.
+3. **`close_position` early return:** When called for a symbol not found on Alpaca, the function
+   returned early WITHOUT calling `_unregister_position`.
 
-In `run_monitor()`: detect positions missing from Alpaca and clean them up:
-- If `DTE < 0` (option definitively expired) → unregister + log as LOSS.
-- If Alpaca responded successfully but the contract is absent during a live
-  session → classify as orphan, unregister + log as LOSS.
+In all three cases, positions accumulated in `cardona_positions.json` indefinitely. With a 2-position
+cap, two expired positions permanently halted all new trading.
 
-In `close_position()`: when Alpaca has no record of the symbol, unregister it
-from the registry immediately instead of silently returning.
+**Fix — `run_monitor`:** Added orphan/expiry detection at the top of each loop iteration:
+```python
+if ap is None:
+    if exp_parseable and dte < 0:
+        # Definitively expired — always clean up
+        _ct._unregister_position(occ_sym)
+        _append_trade_lesson(meta, -1.0)
+        continue
+    if alpaca_map and in_session():
+        # API is working and position is gone — externally closed
+        _ct._unregister_position(occ_sym)
+        _append_trade_lesson(meta, -1.0)
+        continue
+```
+
+**Fix — `close_position`:**
+```python
+if symbol not in open_syms:
+    print(f"SKIP: no open position for {symbol} — removing from registry")
+    _unregister_position(symbol)   # ← added
+    return
+```
 
 ---
 
-### BUG-10 — Circuit Breaker Leaves Scan Panel Incomplete (LOW)
-**File:** `scripts/live_trader.py` — `run_scan()`  
-**Category:** Edge case  
-**Severity:** Low  
+### BUG-10 — IMPORTANT — Circuit breaker left scan panel incomplete (< 10 rows)
+**File:** `live_trader.py:run_scan`
+**Category:** Edge Case / Display
 
-**Root cause:**  
-When the API circuit breaker fired (3 consecutive symbol failures), `run_scan`
-returned early and set `state.scan_rows` to only the symbols scanned so far.
-The UI scan panel would show fewer than 10 rows, making it ambiguous whether
-the bot was still active.
+**Problem:** When the API circuit breaker triggered after 3 consecutive fetch failures,
+`state.scan_rows = rows` captured only the symbols attempted (3 error rows). The remaining
+7 symbols were never added. The scan panel displayed fewer than 10 rows with no explanation
+for the missing symbols.
 
-**Fix:**  
-Before early return, pad remaining symbols as ERROR rows:
+**Fix:** Before returning from the circuit breaker, pad with explicit error rows:
 ```python
 scanned = {r["symbol"] for r in rows}
 for sym in SYMBOLS:
     if sym not in scanned:
         rows.append({"symbol": sym, "price": 0, "trend": "?",
                      "signal": None, "result": "ERROR: API down"})
+state.scan_rows = rows
 ```
 
 ---
 
-### BUG-11 — HTML Injection in EOD Email Lessons Section (LOW)
-**File:** `scripts/notify.py` — `build_html()`  
-**Category:** Edge case / security  
-**Severity:** Low  
+### BUG-11 — MINOR — Lesson text injected raw into HTML email
+**File:** `notify.py:build_html`
+**Category:** HTML Injection
 
-**Root cause:**  
-Lesson text from `lessons.md` was inserted directly into HTML without escaping.
-Any `<`, `>`, or `&` character in a lesson note would break the email HTML.
-
-**Fix:**  
+**Problem:** Lesson lines from `memory/lessons.md` were inserted directly:
 ```python
-f'· {_html.escape(ln)}</p>'
+content += f'· {ln}</p>'
 ```
+Any `<`, `>`, `&` or `"` in a lesson would corrupt the email layout.
 
----
-
-### BUG-12 — `round_number_levels` Could Generate Zero/Negative Levels (LOW)
-**File:** `scripts/cardona_scanner.py`, `scripts/notify.py` — `round_number_levels()`  
-**Category:** Math error / edge case  
-**Severity:** Low  
-
-**Root cause:**  
-`lo = int(base - ROUND_RANGE)` could produce 0 or negative values for very low
-prices. A zero level would cause division-by-zero in `_near()` and `_dedup()`.
-Not reachable with the current watchlist (all symbols well above $30) but a
-latent risk.
-
-**Fix:**  
+**Fix:**
 ```python
-lo = max(ROUND_STEP, int(base - ROUND_RANGE))
+import html as _html
+...
+content += f'· {_html.escape(ln)}</p>'
 ```
 
 ---
 
-## Additional Notes (No Code Change Required)
+### BUG-12 — IMPORTANT — `round_number_levels` generated zero/negative strike levels
+**Files:** `cardona_scanner.py`, `notify.py`
+**Category:** Math Error / Division by Zero
 
-### NOTE-A — `_earnings_day()` Is a Safe Stub
-`_is_earnings_day()` always returns `False`. This is documented as intentional
-pending an earnings-calendar API integration. Current behavior is the safe
-default.
+**Problem:**
+```python
+lo = int(base - ROUND_RANGE)  # ROUND_RANGE = 30
+```
+For any price ≤ $30, `lo` could be 0 or negative. `_dedup` divides by `out[-1]` and `_near`
+divides by `level`, both producing `ZeroDivisionError` if a 0-level entered the S/R pool.
+Current watchlist prices (min ~$180) avoid this, but the code was one new symbol away from
+crashing.
 
-### NOTE-B — Infinite Pagination Loop in `fetch_bars`
-A perpetual `next_page_token` from Alpaca would cause `fetch_bars()` to loop
-forever. With `LOOKBACK_DAYS=10` and `limit=1000` this cannot occur in practice
-(≤70 bars fits in one page).
-
-### NOTE-C — `notify.py` `fetch_bars` Has No Retry
-Returns `[]` on first failure with no retry. This can produce incomplete EOD
-reports on transient errors but has no effect on live trading decisions.
+**Fix:**
+```python
+lo = max(ROUND_STEP, int(base - ROUND_RANGE))  # never generate 0 or negative levels
+```
 
 ---
 
-## Audit Checklist
+## Bugs Investigated — Not Fixed (by design or non-issue)
 
-| Category | Bugs Found | Status |
-|----------|-----------|--------|
-| Stale data bugs | 0 | ✅ No live stale-data path found |
-| Stop loss execution bugs | BUG-03, BUG-09 | ✅ Fixed |
-| Position tracking bugs | BUG-09 | ✅ Fixed |
-| Order placement bugs | BUG-04, BUG-05 | ✅ Fixed |
-| Crash and reconnect bugs | BUG-02, BUG-08 | ✅ Fixed |
-| Profit target bugs | BUG-01, BUG-03 | ✅ Fixed |
-| Math errors | BUG-01, BUG-12 | ✅ Fixed |
-| Race conditions | 0 | ✅ Scan+monitor are sequential, no threads |
-| Edge cases | BUG-06, BUG-07, BUG-10, BUG-11, BUG-12 | ✅ Fixed |
-
-**Total bugs found: 12 (11 fixed in this audit, 1 already fixed prior)**
+| | Description | Verdict |
+|-|-------------|---------|
+| A | `fetch_bars` calls `sys.exit()` on HTTP errors | Safe — `_safe_bars` explicitly catches `SystemExit`. |
+| B | Market orders for options (no limit orders) | Design choice per Cardona strategy. |
+| C | No market holiday detection in `in_session()` | `buy_option` uses Alpaca clock to block orders. Scanning on holidays wastes API calls but causes no harm. |
+| D | `_next_expiry` last-resort fallback may return non-Friday | Mathematically unreachable with a 5–14 day window. `_find_contract` would return NO_CONTRACT safely. |
+| E | `_safe_bars` has no total-fetch timeout | ≈70 bars max, ~2 pages, well within 15-min scan interval. |
+| F | Cycle tracker (`cycles.md`) not auto-updated | By design — CLAUDE.md specifies manual tracking. |
