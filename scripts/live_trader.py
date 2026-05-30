@@ -84,6 +84,8 @@ def in_session() -> bool:
 
 def past_session() -> bool:
     t = et_now()
+    if t.weekday() >= 5:
+        return False
     return (t.hour, t.minute) >= SESSION_END
 
 
@@ -124,6 +126,7 @@ class BotState:
         self.error_count  = 0
         self.status       = "STARTING"
         self.eod_sent     = False
+        self.eod_sent_date: date | None = None   # tracks which date EOD was last sent
         self.start_time   = et_now()
 
     def log(self, msg: str, level: str = "INFO") -> None:
@@ -157,7 +160,7 @@ def _append_trade_lesson(meta: dict, pl_pct: float) -> None:
     """Write closed trade to lessons.md so it's visible in EOD journal."""
     path   = MEM_DIR / "lessons.md"
     today  = date.today().isoformat()
-    result = "WIN" if pl_pct >= 1.0 else "LOSS"
+    result = "WIN" if pl_pct >= TP_THRESHOLD else "LOSS"
     under  = meta.get("underlying", "?")
     typ    = meta.get("type", "?")
     strike = meta.get("strike", 0)
@@ -255,6 +258,12 @@ def run_scan(state: BotState) -> None:
                     "retry in 2 min", "ERROR"
                 )
                 state.next_scan = et_now() + timedelta(minutes=2)
+                # Pad remaining symbols so scan panel always shows all 10 rows.
+                scanned = {r["symbol"] for r in rows}
+                for sym in SYMBOLS:
+                    if sym not in scanned:
+                        rows.append({"symbol": sym, "price": 0, "trend": "?",
+                                     "signal": None, "result": "ERROR: API down"})
                 state.scan_rows = rows
                 state.last_scan = et_now()
                 return
@@ -397,15 +406,25 @@ def _exec_buy(symbol: str, direction: str, strike: float,
         state.log(f"Buy error: {e}", "ERROR")
 
 
-def _exec_close(occ_sym: str, state: BotState) -> None:
+def _exec_close(occ_sym: str, state: BotState) -> bool:
+    """Returns True if the close subprocess exited successfully, False on any failure."""
     cmd = [sys.executable, str(_SCRIPTS / "cardona_trade.py"), "close", occ_sym]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         for ln in r.stdout.strip().splitlines():
             if ln.strip():
                 state.log(f"  {ln.strip()}")
+        if r.returncode != 0:
+            if r.stderr.strip():
+                state.log(f"  ERR: {r.stderr.strip()[:200]}", "ERROR")
+            return False
+        return True
+    except subprocess.TimeoutExpired:
+        state.log(f"Close timeout: {occ_sym}", "ERROR")
+        return False
     except Exception as e:
         state.log(f"Close error {occ_sym}: {e}", "ERROR")
+        return False
 
 
 # ── Position monitor ──────────────────────────────────────────────────────────
@@ -426,25 +445,52 @@ def run_monitor(state: BotState) -> None:
         parsed  = _ct._parse_occ(occ_sym)
         ap      = alpaca_map.get(occ_sym)
 
+        # Compute DTE first — needed for orphan/expiry decisions below.
+        exp_str = parsed.get("expiration", meta.get("expiry", "?"))
+        try:
+            dte = (date.fromisoformat(exp_str) - date.today()).days
+            exp_parseable = True
+        except Exception:
+            dte = -1
+            exp_parseable = False
+
+        # ── Orphan / expiry cleanup ──────────────────────────────────────────
+        if ap is None:
+            if exp_parseable and dte < 0:
+                # Option has definitively expired — free the slot.
+                state.log(f"EXPIRED: {occ_sym} DTE={dte} — removing from registry", "WARN")
+                _ct._unregister_position(occ_sym)
+                _append_trade_lesson(meta, -1.0)
+                closed_cnt += 1
+                state.cycle = _read_cycles()
+                continue
+            if alpaca_map and in_session():
+                # Alpaca returned positions successfully (map non-empty or we are in session
+                # and market is open), but this contract is gone — externally closed or
+                # never filled.  Free the slot so future trades aren't blocked.
+                state.log(
+                    f"ORPHANED: {occ_sym} not found in Alpaca live positions "
+                    f"— removing from registry", "WARN"
+                )
+                _ct._unregister_position(occ_sym)
+                _append_trade_lesson(meta, -1.0)
+                closed_cnt += 1
+                state.cycle = _read_cycles()
+                continue
+
         if ap:
             pl_pct  = float(ap.get("unrealized_plpc", 0))
             pl_d    = float(ap.get("unrealized_pl",   0))
             entry   = float(ap.get("avg_entry_price",  meta.get("entry_price_estimate", 0)))
             current = float(ap.get("current_price",    0))
         else:
-            # Market closed or position filled; try snapshot
+            # Market closed or API temporarily unavailable; try snapshot for display.
             snap    = _safe_snapshot(occ_sym)
             bid     = float(snap.get("latestQuote", {}).get("bp", 0)) if snap else 0
             entry   = float(meta.get("entry_price_estimate", 0))
             current = bid if bid else 0
             pl_pct  = ((current - entry) / entry) if entry else 0
             pl_d    = (current - entry) * 100 if entry else 0
-
-        exp_str = parsed.get("expiration", meta.get("expiry", "?"))
-        try:
-            dte = (date.fromisoformat(exp_str) - date.today()).days
-        except Exception:
-            dte = -1
 
         enriched[occ_sym] = {
             **meta,
@@ -461,11 +507,12 @@ def run_monitor(state: BotState) -> None:
             under = (f"{parsed.get('underlying','?')} "
                      f"${parsed.get('strike',0):.0f} {parsed.get('type','?')}")
             state.log(f"TAKE PROFIT: {under} at {pl_pct*100:+.1f}% — closing", "TRADE")
-            _exec_close(occ_sym, state)
-            _append_trade_lesson(meta, pl_pct)
-            del enriched[occ_sym]
-            closed_cnt += 1
-            state.cycle = _read_cycles()
+            if _exec_close(occ_sym, state):
+                _append_trade_lesson(meta, pl_pct)
+                del enriched[occ_sym]
+                closed_cnt += 1
+                state.cycle = _read_cycles()
+            # If close failed, keep in enriched so it retries next monitor cycle.
 
         elif dte == 0:
             state.log(f"WARNING: {occ_sym} expires today — letting expire per strategy", "WARN")
@@ -503,8 +550,9 @@ def run_eod(state: BotState) -> None:
         for ln in r.stdout.strip().splitlines():
             if ln.strip():
                 state.log(f"  {ln.strip()}")
-        state.eod_sent = True
-        state.status   = "EOD_COMPLETE"
+        state.eod_sent      = True
+        state.eod_sent_date = et_now().date()
+        state.status        = "EOD_COMPLETE"
         state.log("EOD journal sent")
     except Exception as e:
         state.log(f"EOD error: {e}", "ERROR")
@@ -810,8 +858,8 @@ class CardonaLiveTrader:
                 try:
                     now = et_now()
 
-                    # ── EOD journal (4:15 PM, once) ──────────────────────
-                    if in_eod_window() and not st.eod_sent:
+                    # ── EOD journal (4:15 PM, once per calendar day) ─────
+                    if in_eod_window() and st.eod_sent_date != et_now().date():
                         run_eod(st)
 
                     # ── Market hours logic ───────────────────────────────
@@ -840,6 +888,13 @@ class CardonaLiveTrader:
                         else:
                             # Pre-market
                             st.status = "MARKET_CLOSED"
+
+                    # Reset error counter on a clean iteration so transient
+                    # errors spread over multiple days don't accumulate to MAX.
+                    if st.error_count > 0:
+                        st.error_count = 0
+                        if st.status == "ERROR":
+                            st.status = "ACTIVE" if in_session() else "MARKET_CLOSED"
 
                     live.update(_render(st))
                     time.sleep(30)

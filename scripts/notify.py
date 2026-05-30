@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Cardona Notify — EOD journal email via SendGrid."""
 
+import html as _html
 import json
 import os
 import re
@@ -168,7 +169,7 @@ def find_resistance(bars: list) -> list:
 
 def round_number_levels(price: float) -> list:
     base = round(price / ROUND_STEP) * ROUND_STEP
-    lo   = int(base - ROUND_RANGE)
+    lo   = max(ROUND_STEP, int(base - ROUND_RANGE))   # never generate 0 or negative levels
     hi   = int(base + ROUND_RANGE)
     return [float(x) for x in range(lo, hi + ROUND_STEP, ROUND_STEP)]
 
@@ -875,7 +876,7 @@ def build_html(today: str, positions: list, account: dict,
         for ln in lessons:
             content += (f'<p style="color:{DIM};font-size:12px;'
                         f'line-height:1.5;margin:0 0 6px;font-family:{_FONT}">'
-                        f'· {ln}</p>')
+                        f'· {_html.escape(ln)}</p>')
     html_parts.append(_card(content))
 
     # ── FOOTER ────────────────────────────────────────────────────────────────

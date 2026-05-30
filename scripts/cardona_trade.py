@@ -311,14 +311,17 @@ def buy_option(symbol: str, direction: str, strike: float, expiration: str) -> N
             print(f"SKIP [BUDGET_EXCEEDED]: est. cost ${cost:.0f} exceeds ${MAX_BUDGET:.0f} budget")
             return
     else:
-        print("  Ask price    : unavailable — market may be closed")
-        print("  Warning      : budget cannot be verified; proceeding with market order")
-        ask = 0.0
+        print("SKIP [NO_PRICE]: ask price unavailable — cannot verify $200 budget limit")
+        return
 
     # Market-hours hard block (autonomous rules)
     mins = _mins_to_close()
     if mins < 0:
         print("SKIP [TIME_BLOCK]: market is currently CLOSED — no autonomous trades outside hours")
+        return
+    if not (0 < mins < float("inf")):
+        # float("inf") means the clock API failed — skip to be safe
+        print("SKIP [TIME_BLOCK]: market status unknown (clock API error) — skipping to be safe")
         return
     if mins <= 30:
         print(f"SKIP [TIME_BLOCK]: {mins:.0f} min until close — no trades in last 30 min of session")
@@ -371,9 +374,12 @@ def close_position(symbol: str) -> None:
     open_syms = [p["symbol"] for p in positions]
 
     if symbol not in open_syms:
-        print(f"SKIP: no open position for {symbol}")
+        # Position not on Alpaca — expired, filled-then-closed externally, or never filled.
+        # Remove from registry so the slot isn't permanently occupied.
+        print(f"SKIP: no open position for {symbol} on Alpaca — removing from registry")
         if open_syms:
             print(f"Open: {', '.join(open_syms)}")
+        _unregister_position(symbol)
         return
 
     print(f"Closing {symbol} ...")

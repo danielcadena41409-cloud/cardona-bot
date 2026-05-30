@@ -162,7 +162,7 @@ def find_resistance(bars: list[dict]) -> list[float]:
 def round_number_levels(price: float) -> list[float]:
     """Every $5 round number within ±$30 of current price."""
     base = round(price / ROUND_STEP) * ROUND_STEP
-    lo   = int(base - ROUND_RANGE)
+    lo   = max(ROUND_STEP, int(base - ROUND_RANGE))   # never generate 0 or negative levels
     hi   = int(base + ROUND_RANGE)
     return [float(x) for x in range(lo, hi + ROUND_STEP, ROUND_STEP)]
 
@@ -286,10 +286,13 @@ def _suggested_strike(symbol: str, price: float, direction: str) -> float:
 # ── Autonomous trade helpers ──────────────────────────────────────────────────
 
 def _is_after_cutoff() -> bool:
-    """Block auto-trades at or after 3:30 PM ET (19:30 UTC during EDT)."""
-    utc = datetime.now(timezone.utc)
-    # 3:30 PM EDT = 19:30 UTC; conservative for EST overlap
-    return utc.hour > 19 or (utc.hour == 19 and utc.minute >= 30)
+    """Block auto-trades at or after 3:30 PM ET (handles EDT and EST correctly)."""
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    return (now_et.hour, now_et.minute) >= (15, 30)
 
 
 def _is_earnings_day(symbol: str) -> bool:
