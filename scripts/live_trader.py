@@ -1053,12 +1053,48 @@ def run_test() -> None:
     sys.exit(0 if failed == 0 else 1)
 
 
+# ── Process lock (prevent duplicate instances) ────────────────────────────────
+
+_PID_FILE = _ROOT / "data" / "live_trader.pid"
+
+
+def _acquire_pid_lock() -> None:
+    """Exit immediately if another live_trader instance is already running."""
+    if TEST_MODE:
+        return   # --test mode never acquires the lock
+    _PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if _PID_FILE.exists():
+        try:
+            existing_pid = int(_PID_FILE.read_text().strip())
+            # Check whether that PID is still alive
+            import signal as _signal
+            _signal.kill(existing_pid, 0)   # signal 0 = existence check, no kill
+            print(f"ERROR: live_trader already running (PID {existing_pid}). "
+                  f"Kill it first or delete {_PID_FILE}.")
+            sys.exit(1)
+        except (ProcessLookupError, ValueError):
+            pass   # stale PID file — safe to overwrite
+    _PID_FILE.write_text(str(os.getpid()))
+
+
+def _release_pid_lock() -> None:
+    try:
+        if _PID_FILE.exists() and int(_PID_FILE.read_text().strip()) == os.getpid():
+            _PID_FILE.unlink()
+    except Exception:
+        pass
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
     if TEST_MODE:
         run_test()
-    CardonaLiveTrader().run()
+    _acquire_pid_lock()
+    try:
+        CardonaLiveTrader().run()
+    finally:
+        _release_pid_lock()
 
 
 if __name__ == "__main__":
