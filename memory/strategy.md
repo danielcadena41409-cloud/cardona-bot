@@ -243,12 +243,44 @@ At scan start, read `~/trading-agent/data/regime.json`. The Markov regime overri
 |--------|-------------------|
 | **BULL_TRENDING** | Favor calls. If a symbol has both CALL and PUT signals, take the CALL only. |
 | **BEAR_TRENDING** | Favor puts. If a symbol has both CALL and PUT signals, take the PUT only. |
-| **HIGH_VOLATILITY** | All auto-trades blocked. Bot scans but does not enter. Log "HIGH_VOLATILITY regime blocked entry" in journal. |
-| **SIDEWAYS** | Normal rules but drift tolerance tightens: 0.5% → 0.3% (no-chase threshold). |
+| **HIGH_VOLATILITY** | All auto-trades blocked. Bot scans but does not enter. |
+| **SIDEWAYS** | **HARD BLOCK** on all standard entries. Only catalyst exception trades allowed (see below). |
 
 **Default on failure:** If `regime.json` is missing or unreadable, default to SIDEWAYS.
 
 Regime + tomorrow forecast are shown at the top of every scan output and in the EOD email.
+
+---
+
+## SIDEWAYS CATALYST-ONLY MODE
+
+_Implemented 2026-06-02. Code: `scripts/options_research.py`, enforced in `run_scan` / `run_monitor`._
+
+In SIDEWAYS, the normal 6/6 entry criteria are **not sufficient**. A catalyst must also be present.
+
+### Rule 1 — Hard Block
+All standard directional entries are blocked. No entries without an active catalyst.
+
+### Rule 2 — Catalyst Exception Gate
+All six sub-conditions must be true simultaneously:
+
+| Sub-condition | Value |
+|---------------|-------|
+| Earnings within N days | ≤ 5 calendar days for the specific symbol |
+| IV Rank | ≤ 45 (low IV — options are cheap, run-up not priced in) |
+| Day of week | Not Friday |
+| Signal score | 6/6 (all normal gates pass) |
+| Open positions | ≤ 1 total |
+| Risk per trade | ≤ 0.5% of portfolio |
+
+### Rule 3 — Mandatory Pre-Earnings Exit
+If a held position's underlying has earnings **today**, the bot force-closes by market sell before 3:30 PM ET. The strategy trades the run-up, never the binary event.
+
+### Rule 4 — No Friday Entries
+No new positions opened on Fridays while in SIDEWAYS.
+
+### Rule 5 — Normal Rules Resume
+When regime moves to BULL_TRENDING or BEAR_TRENDING, all normal rules resume with no restrictions.
 
 ---
 

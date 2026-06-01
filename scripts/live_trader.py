@@ -38,8 +38,9 @@ except ImportError as e:
 # ── Shared modules ────────────────────────────────────────────────────────────
 _SCRIPTS = Path(__file__).parent
 sys.path.insert(0, str(_SCRIPTS))
-import cardona_scanner as _cs   # noqa: E402
-import cardona_trade   as _ct   # noqa: E402
+import cardona_scanner    as _cs   # noqa: E402
+import cardona_trade      as _ct   # noqa: E402
+import options_research   as _or   # noqa: E402
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 ET            = ZoneInfo("America/New_York")
@@ -271,6 +272,7 @@ def run_scan(state: BotState) -> None:
         consecutive_failures = 0
 
         price       = bars[-1]["c"]
+        _or.update_iv_history(symbol, price)   # build IV Rank history over time
         trend       = _cs.market_trend(bars)
         sup         = _cs.find_support(bars)
         res         = _cs.find_resistance(bars)
@@ -344,15 +346,47 @@ def run_scan(state: BotState) -> None:
 
             # Position limit + no re-entry into same symbol (read fresh)
             cardona_pos = _ct._load_cardona_positions()
-            n_pos = len(cardona_pos)
-            if n_pos >= MAX_POSITIONS:
+            n_pos       = len(cardona_pos)
+            # In SIDEWAYS, max 1 open position (Rule 2); otherwise normal limit of 2
+            _pos_limit  = 1 if regime == "SIDEWAYS" else MAX_POSITIONS
+            if n_pos >= _pos_limit:
                 best_signal = s
-                result_str  = f"SKIP [POSITION_LIMIT] {n_pos}/2"
+                result_str  = (
+                    f"SKIP [SIDEWAYS_POSITION_LIMIT] {n_pos}/1"
+                    if regime == "SIDEWAYS" else
+                    f"SKIP [POSITION_LIMIT] {n_pos}/2"
+                )
                 continue
             if any(occ.upper().startswith(symbol.upper()) for occ in cardona_pos):
                 best_signal = s
                 result_str  = "SKIP [ALREADY_HELD]"
                 continue
+
+            # ── SIDEWAYS CATALYST-ONLY MODE (Rules 1–5) ──────────────────────
+            if regime == "SIDEWAYS":
+                # Rule 4: no Friday entries
+                if et_now().weekday() == 4:
+                    best_signal = s
+                    result_str  = "SKIP [SIDEWAYS_NO_FRIDAY]"
+                    continue
+                # Rules 1+2: catalyst check (earnings within 5d + IV Rank ≤ 45)
+                equity = state.account.get("equity", 0.0)
+                cat_ok, cat_reason, cat_info = _or.check_catalyst_exception(
+                    symbol, equity
+                )
+                if not cat_ok:
+                    best_signal = s
+                    result_str  = f"SKIP [SIDEWAYS] {cat_reason}"
+                    continue
+                # Log the catalyst approval details
+                state.log(
+                    f"SIDEWAYS CATALYST OK: {symbol} — "
+                    f"earnings {cat_info.get('earnings_date', '?')} | "
+                    f"IV Rank {cat_info.get('iv_rank', 0):.0f} | "
+                    f"budget ${cat_info.get('sideways_budget', 0):.0f}",
+                    "INFO",
+                )
+            # ─────────────────────────────────────────────────────────────────
 
             # Contract availability
             expiry = _cs._next_expiry()
@@ -501,6 +535,26 @@ def run_monitor(state: BotState) -> None:
             "dte":     dte,
             "parsed":  parsed,
         }
+
+        # ── Mandatory pre-earnings exit (Rule 3) ─────────────────────────────
+        # Any position whose underlying reports earnings today must be closed
+        # before 3:30 PM ET — trading the run-up, not the binary event.
+        underlying = parsed.get("underlying", "")
+        if underlying and in_session() and _or.is_earnings_today(underlying):
+            et_t = et_now()
+            if (et_t.hour, et_t.minute) < SESSION_END:
+                state.log(
+                    f"PRE-EARNINGS EXIT: {underlying} earnings today — "
+                    f"closing before {SESSION_END[0]}:{SESSION_END[1]:02d} ET",
+                    "TRADE",
+                )
+                if _exec_close(occ_sym, state):
+                    _append_trade_lesson(meta, pl_pct)
+                    del enriched[occ_sym]
+                    closed_cnt += 1
+                    state.cycle = _read_cycles()
+                continue   # skip take-profit check; position is gone (or close failed)
+        # ─────────────────────────────────────────────────────────────────────
 
         # Auto-close at take-profit threshold
         if pl_pct >= TP_THRESHOLD:
