@@ -56,8 +56,9 @@ EOD_HOUR      = 16
 EOD_MIN       = 15           # 4:15 PM ET — EOD journal
 MAX_RETRIES   = 5
 RETRY_WAITS   = [5, 15, 30, 60, 120]
-MAX_POSITIONS = 2
-MAX_BUDGET    = 200.0
+MAX_POSITIONS    = 2
+MAX_DAILY_TRADES = 3        # max new entry orders per calendar day
+MAX_BUDGET       = 200.0
 TP_THRESHOLD  = 0.90
 PROXIMITY     = _cs.PROXIMITY           # 0.005 = 0.5%
 _ROOT         = _SCRIPTS.parent
@@ -124,11 +125,13 @@ class BotState:
         self.positions    = {}           # {occ_sym: enriched dict}
         self.cycle        = _read_cycles()
         self.activity     = deque(maxlen=20)
-        self.error_count  = 0
-        self.status       = "STARTING"
-        self.eod_sent     = False
-        self.eod_sent_date: date | None = None   # tracks which date EOD was last sent
-        self.start_time   = et_now()
+        self.error_count      = 0
+        self.status           = "STARTING"
+        self.eod_sent         = False
+        self.eod_sent_date:    date | None = None
+        self.daily_trades:     int         = 0    # new entry orders placed today
+        self.daily_trades_date: date | None = None  # which day the counter belongs to
+        self.start_time       = et_now()
 
     def log(self, msg: str, level: str = "INFO") -> None:
         ts = et_now().strftime("%H:%M:%S")
@@ -236,6 +239,14 @@ def _safe_snapshot(occ_sym: str) -> dict:
 
 def run_scan(state: BotState) -> None:
     """Scan all 10 symbols and auto-trade when all conditions pass."""
+    # Reset daily entry counter when the calendar date rolls over.
+    # Closes, monitor actions, and startup runs never modify daily_trades,
+    # so only calls originating in _exec_buy() count toward this limit.
+    _today = et_now().date()
+    if state.daily_trades_date != _today:
+        state.daily_trades      = 0
+        state.daily_trades_date = _today
+
     regime_data    = _cs._read_regime()
     regime         = regime_data.get("current_regime", "SIDEWAYS")
     drift_limit    = 0.003 if regime == "SIDEWAYS" else PROXIMITY
@@ -344,6 +355,13 @@ def run_scan(state: BotState) -> None:
                 result_str  = "SKIP [EARNINGS_BLOCK]"
                 continue
 
+            # Daily entry limit — only new entry orders count (not closes of any kind)
+            if state.daily_trades >= MAX_DAILY_TRADES:
+                best_signal = s
+                result_str  = (f"SKIP [DAILY_LIMIT] "
+                               f"{state.daily_trades}/{MAX_DAILY_TRADES} entries today")
+                continue
+
             # Position limit + no re-entry into same symbol (read fresh)
             cardona_pos = _ct._load_cardona_positions()
             n_pos       = len(cardona_pos)
@@ -429,6 +447,10 @@ def _exec_buy(symbol: str, direction: str, strike: float,
            "buy", symbol, direction, f"{strike:.0f}", expiry]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        # Count the order submission against today's entry limit now — before
+        # inspecting the result.  Closes, monitor actions, and startup runs
+        # never call _exec_buy so they can never touch this counter.
+        state.daily_trades += 1
         for ln in r.stdout.strip().splitlines():
             if ln.strip():
                 state.log(f"  {ln.strip()}")
@@ -700,7 +722,10 @@ def _header_panel(state: BotState) -> Panel:
     t.append(f"  Cash: ${cash:>10,.0f}", style="dim")
     t.append(f"  P&L: {sign}${abs(day_pl):,.0f}",
              style="bright_green" if day_pl >= 0 else "bright_red")
-    t.append(f"  │  Next scan: {nxt}\n", style="cyan")
+    t.append(f"  │  Next scan: {nxt}  │  ", style="cyan")
+    daily_color = "bright_red" if state.daily_trades >= MAX_DAILY_TRADES else "dim"
+    t.append(f"Today: {state.daily_trades}/{MAX_DAILY_TRADES} entries\n",
+             style=daily_color)
     t.append(f"  Cycle {cyc['cycle']}: [{bar}]  ", style="dim")
     t.append(f"{cyc['trades']}/10  ", style="white")
     t.append(f"{cyc['wins']}W ", style="bright_green")
