@@ -136,36 +136,20 @@ At the start of every scan, the bot reads `~/trading-agent/data/regime.json` (wr
 | **BULL_TRENDING** | Favor call signals. If both CALL and PUT appear on the same symbol, keep only the CALL. |
 | **BEAR_TRENDING** | Favor put signals. If both CALL and PUT appear on the same symbol, keep only the PUT. |
 | **HIGH_VOLATILITY** | Skip all new entries — bot goes silent. Signals are displayed for visibility only. |
-| **SIDEWAYS** | **HARD BLOCK** — all standard directional entries blocked. Only catalyst exception entries allowed (see below). |
+| **SIDEWAYS** | Opposite-direction signals blocked (hammer in downtrend, hanging man in uptrend). SIDEWAYS trend allowed for both calls and puts **if the signal candle is within 0.2% of the S/R level**. Drift tolerance 0.5% (same as all regimes). Max 1 open position while SIDEWAYS. |
 
 The current regime and tomorrow's forecast are printed at the top of every scan output and displayed in the daily EOD email journal. If `regime.json` is missing or unreadable, the bot defaults to SIDEWAYS (safest posture).
 
 ---
 
-## SIDEWAYS CATALYST-ONLY MODE
+## SIDEWAYS ENTRY RULES
 
-When regime is **SIDEWAYS**, the bot replaces the normal entry logic with strict catalyst-gated entries. Implemented in `scripts/options_research.py` and enforced in `run_scan` / `run_monitor`.
+When regime is **SIDEWAYS**:
 
-### Rule 1 — Hard Block
-All standard directional entries (calls AND puts) are blocked regardless of signal quality. A 6/6 confirmed signal does NOT qualify without a catalyst.
+- **Calls:** allowed if trend is uptrend OR (trend is sideways AND hammer low is within 0.2% of support)
+- **Puts:** allowed if trend is downtrend OR (trend is sideways AND hanging man high is within 0.2% of resistance)
+- **Hard blocks:** hammer in a downtrend (always blocked); hanging man in an uptrend (always blocked)
+- **Max 1 open position** while in SIDEWAYS (vs. normal limit of 2)
+- All other normal filters apply (drift ≤ 0.5%, confirmed signal, time gate, $200 budget, etc.)
 
-### Rule 2 — Catalyst Exception (ALL conditions must be met simultaneously)
-| Condition | Requirement |
-|-----------|-------------|
-| Earnings announcement | Within the next **5 calendar days** for that specific symbol |
-| IV Rank | At or **below 45** (low IV = cheap options, run-up not yet priced in) |
-| Day of week | **Not Friday** |
-| Signal quality | **6/6** — full qualification only (all normal checks must pass) |
-| Open positions | **Maximum 1** total while in SIDEWAYS (down from normal limit of 2) |
-| Risk cap | **0.5% of portfolio** maximum (not the normal $200 fixed cap when account grows) |
-
-IV Rank history is built automatically by `options_research.update_iv_history()` which is called once per symbol per scan. At least 30 days of history are required before IV Rank is trusted; before that, SIDEWAYS catalyst trades are blocked (conservative default).
-
-### Rule 3 — Mandatory Pre-Earnings Exit
-Any position whose underlying symbol has earnings **today** is force-closed by market sell no later than **3:30 PM ET**. The bot trades the IV run-up into earnings, not the binary event itself. This check runs in every monitor cycle during market hours.
-
-### Rule 4 — No Friday Entries
-No new options positions may be opened on Fridays while in SIDEWAYS, regardless of catalyst or signal score.
-
-### Rule 5 — Normal Rules Resume
-When regime shifts to **BULL_TRENDING** or **BEAR_TRENDING**, all normal entry rules resume immediately with no restrictions or carry-over from SIDEWAYS mode.
+The 0.2% proximity requirement acts as the confirming filter for SIDEWAYS: if price is right at a key level, the S/R itself provides directional context even when the broader 10-bar trend is mixed.

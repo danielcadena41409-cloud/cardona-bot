@@ -249,7 +249,7 @@ def run_scan(state: BotState) -> None:
 
     regime_data    = _cs._read_regime()
     regime         = regime_data.get("current_regime", "SIDEWAYS")
-    drift_limit    = 0.003 if regime == "SIDEWAYS" else PROXIMITY
+    drift_limit    = PROXIMITY   # 0.5% for all regimes
     state.regime   = regime_data
 
     if regime == "HIGH_VOLATILITY":
@@ -292,6 +292,8 @@ def run_scan(state: BotState) -> None:
         res_all     = sorted((set(res) | {r for r in rnds if r > price}), reverse=True)
         signals     = _cs.find_signals(bars, sup_all, res_all)
         latest_time = bars[-1]["t"]
+        prev_time   = bars[-2]["t"] if len(bars) >= 2 else latest_time
+        fresh_times = {latest_time, prev_time}
 
         # Regime preference filtering
         if regime in ("BULL_TRENDING", "BEAR_TRENDING"):
@@ -313,18 +315,30 @@ def run_scan(state: BotState) -> None:
                 result_str  = f"{s['type']} {s['pattern']} — unconfirmed"
                 continue
 
-            # Freshness
-            if s["conf_time"] != latest_time:
+            # Freshness — accept current bar or previous bar (~2hr window)
+            if s["conf_time"] not in fresh_times:
                 best_signal = s
                 result_str  = "SKIP [STALE_SIGNAL]"
                 continue
 
-            # Trend alignment
-            trend_ok = (direction == "call" and trend == "uptrend") or \
-                       (direction == "put"  and trend == "downtrend")
+            # Trend alignment — block only completely opposite direction
+            # SIDEWAYS allowed when signal candle is within 0.2% of S/R level
+            sig_extreme = s.get("sig_extreme", s["close"])
+            at_level    = (abs(sig_extreme - s["level"]) / s["level"]
+                           <= _cs.SR_SIDEWAYS_TOL)
+            if direction == "call":
+                trend_ok = trend == "uptrend" or (trend == "sideways" and at_level)
+            else:
+                trend_ok = trend == "downtrend" or (trend == "sideways" and at_level)
             if not trend_ok:
                 best_signal = s
-                result_str  = f"SKIP [TREND_MISMATCH] ({trend})"
+                if trend == "sideways":
+                    pct = abs(sig_extreme - s["level"]) / s["level"] * 100
+                    result_str = (f"SKIP [TREND_MISMATCH] sideways "
+                                  f"{pct:.2f}% from level "
+                                  f"(need ≤{_cs.SR_SIDEWAYS_TOL*100:.1f}%)")
+                else:
+                    result_str = f"SKIP [TREND_MISMATCH] ({trend})"
                 continue
 
             # Regime block
@@ -380,31 +394,7 @@ def run_scan(state: BotState) -> None:
                 result_str  = "SKIP [ALREADY_HELD]"
                 continue
 
-            # ── SIDEWAYS CATALYST-ONLY MODE (Rules 1–5) ──────────────────────
-            if regime == "SIDEWAYS":
-                # Rule 4: no Friday entries
-                if et_now().weekday() == 4:
-                    best_signal = s
-                    result_str  = "SKIP [SIDEWAYS_NO_FRIDAY]"
-                    continue
-                # Rules 1+2: catalyst check (earnings within 5d + IV Rank ≤ 45)
-                equity = state.account.get("equity", 0.0)
-                cat_ok, cat_reason, cat_info = _or.check_catalyst_exception(
-                    symbol, equity
-                )
-                if not cat_ok:
-                    best_signal = s
-                    result_str  = f"SKIP [SIDEWAYS] {cat_reason}"
-                    continue
-                # Log the catalyst approval details
-                state.log(
-                    f"SIDEWAYS CATALYST OK: {symbol} — "
-                    f"earnings {cat_info.get('earnings_date', '?')} | "
-                    f"IV Rank {cat_info.get('iv_rank', 0):.0f} | "
-                    f"budget ${cat_info.get('sideways_budget', 0):.0f}",
-                    "INFO",
-                )
-            # ─────────────────────────────────────────────────────────────────
+            # SIDEWAYS entries passed trend check via 0.2% S/R proximity rule above.
 
             # Contract availability
             expiry = _cs._next_expiry()

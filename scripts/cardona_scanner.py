@@ -21,7 +21,8 @@ DIRECTION_BARS  = 10     # window for trend analysis
 SIGNAL_LOOKBACK = 5      # how many recent bars to scan for signals
 ROUND_STEP   = 5         # $5 round-number increment
 ROUND_RANGE  = 30        # ±$30 around current price
-PROXIMITY    = 0.005     # 0.5% tolerance for "near a level"
+PROXIMITY        = 0.005     # 0.5% tolerance for "near a level"
+SR_SIDEWAYS_TOL  = 0.002     # 0.2% — tighter proximity required for SIDEWAYS-trend entries
 DATA_URL     = "https://data.alpaca.markets/v2"
 LINE         = "─" * 70
 REGIME_FILE  = Path.home() / "trading-agent" / "data" / "regime.json"
@@ -222,15 +223,16 @@ def find_signals(
             if matched:
                 lvl = min(matched, key=lambda s: abs(s - sig["l"]))
                 signals.append({
-                    "type":      "CALL",
-                    "pattern":   "Hammer",
-                    "time":      sig["t"],
-                    "close":     sig["c"],
+                    "type":       "CALL",
+                    "pattern":    "Hammer",
+                    "time":       sig["t"],
+                    "close":      sig["c"],
+                    "sig_extreme": sig["l"],   # candle low — what touched support
                     "conf_close": conf["c"],
-                    "level":     lvl,
-                    "level_tag": "support",
-                    "confirmed": conf["c"] > conf["o"],
-                    "conf_time": conf["t"],
+                    "level":      lvl,
+                    "level_tag":  "support",
+                    "confirmed":  conf["c"] > conf["o"],
+                    "conf_time":  conf["t"],
                 })
 
         if is_hanging_man(sig):
@@ -238,15 +240,16 @@ def find_signals(
             if matched:
                 lvl = min(matched, key=lambda r: abs(r - sig["h"]))
                 signals.append({
-                    "type":      "PUT",
-                    "pattern":   "Hanging Man",
-                    "time":      sig["t"],
-                    "close":     sig["c"],
+                    "type":       "PUT",
+                    "pattern":    "Hanging Man",
+                    "time":       sig["t"],
+                    "close":      sig["c"],
+                    "sig_extreme": sig["h"],   # candle high — what touched resistance
                     "conf_close": conf["c"],
-                    "level":     lvl,
-                    "level_tag": "resistance",
-                    "confirmed": conf["c"] < conf["o"],
-                    "conf_time": conf["t"],
+                    "level":      lvl,
+                    "level_tag":  "resistance",
+                    "confirmed":  conf["c"] < conf["o"],
+                    "conf_time":  conf["t"],
                 })
 
     return signals
@@ -400,7 +403,7 @@ def cmd_scan() -> None:
     regime          = regime_data.get("current_regime", "SIDEWAYS")
     tomorrow        = regime_data.get("tomorrow_forecast", {}).get("most_likely", "SIDEWAYS")
     cardona_rule    = regime_data.get("bot_instructions", {}).get("cardona", "")
-    effective_drift = 0.003 if regime == "SIDEWAYS" else PROXIMITY
+    effective_drift = PROXIMITY   # 0.5% for all regimes
     _regime_icon = {
         "BULL_TRENDING": "▲ BULL_TRENDING", "BEAR_TRENDING": "▼ BEAR_TRENDING",
         "HIGH_VOLATILITY": "⚡ HIGH_VOLATILITY", "SIDEWAYS": "↔ SIDEWAYS",
@@ -469,22 +472,44 @@ def cmd_scan() -> None:
 
         _section("Signals")
         latest_bar_time = bars[-1]["t"]
+        prev_bar_time   = bars[-2]["t"] if len(bars) >= 2 else latest_bar_time
+        fresh_times     = {latest_bar_time, prev_bar_time}
 
         if signals:
             for s in signals:
-                status = "CONFIRMED  " if s["confirmed"] else "unconfirmed"
-                entry  = s["close"]
+                status    = "CONFIRMED  " if s["confirmed"] else "unconfirmed"
+                entry     = s["close"]
                 direction = s["type"].lower()
-                strike = _suggested_strike(symbol, entry, direction)
+                strike    = _suggested_strike(symbol, entry, direction)
+
+                # Trend check: block only completely opposite direction
+                sig_extreme = s.get("sig_extreme", s["close"])
+                at_level    = abs(sig_extreme - s["level"]) / s["level"] <= SR_SIDEWAYS_TOL
 
                 if s["type"] == "CALL":
                     action = f"Buy {symbol} ${strike:.0f} CALL  (≤2 wks, $200 max)"
-                    warn   = tr != "uptrend"
-                    warn_m = f"trend is {tr} — CALL requires uptrend"
+                    if tr == "downtrend":
+                        warn, warn_m = True, "trend is DOWNTREND — CALL blocked (opposite trend)"
+                    elif tr == "sideways" and not at_level:
+                        pct_away = abs(sig_extreme - s["level"]) / s["level"] * 100
+                        warn, warn_m = True, (
+                            f"trend SIDEWAYS — candle {pct_away:.2f}% from support "
+                            f"(need ≤{SR_SIDEWAYS_TOL*100:.1f}%)"
+                        )
+                    else:
+                        warn, warn_m = False, ""
                 else:
                     action = f"Buy {symbol} ${strike:.0f} PUT   (≤2 wks, $200 max)"
-                    warn   = tr != "downtrend"
-                    warn_m = f"trend is {tr} — PUT requires downtrend"
+                    if tr == "uptrend":
+                        warn, warn_m = True, "trend is UPTREND — PUT blocked (opposite trend)"
+                    elif tr == "sideways" and not at_level:
+                        pct_away = abs(sig_extreme - s["level"]) / s["level"] * 100
+                        warn, warn_m = True, (
+                            f"trend SIDEWAYS — candle {pct_away:.2f}% from resistance "
+                            f"(need ≤{SR_SIDEWAYS_TOL*100:.1f}%)"
+                        )
+                    else:
+                        warn, warn_m = False, ""
 
                 print(f"\n    [{status}]  {s['type']} — {s['pattern']}")
                 print(f"      Time      {s['time'][:16]}")
@@ -497,9 +522,11 @@ def cmd_scan() -> None:
                 # ── Autonomous entry logic ──────────────────────────────────
                 if not s["confirmed"]:
                     continue
-                if s["conf_time"] != latest_bar_time:
+                # Allow signals confirmed on current bar OR the previous bar (~2hr window)
+                if s["conf_time"] not in fresh_times:
                     print(f"      SKIP [STALE_SIGNAL] — confirmed on "
-                          f"{s['conf_time'][:16]}, latest bar is {latest_bar_time[:16]}")
+                          f"{s['conf_time'][:16]}, must be within last 2 bars "
+                          f"(current: {latest_bar_time[:16]})")
                     continue
                 if warn:
                     print(f"      SKIP [TREND_MISMATCH] — {warn_m}")

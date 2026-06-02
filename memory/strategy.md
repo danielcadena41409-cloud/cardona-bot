@@ -62,9 +62,11 @@ Analyze the last 10 one-hour candles. Count bar-to-bar transitions:
 |-----------|-----------|----------------|
 | >50% of transitions are higher-high AND higher-low | **UPTREND** | Calls only |
 | >50% of transitions are lower-high AND lower-low | **DOWNTREND** | Puts only |
-| Mixed / neither qualifies | **SIDEWAYS** | **No trade — wait** |
+| Mixed / neither qualifies | **SIDEWAYS** | Calls or puts **if candle within 0.2% of S/R level** |
 
-**Sideways = skip the scan entirely. Do not look for setups when trend is unclear.**
+**Opposite-direction signals are always blocked:** no calls when downtrend, no puts when uptrend.
+
+**SIDEWAYS with S/R proximity:** if trend is sideways but the signal candle's low (hammer) or high (hanging man) is within 0.2% of the matched S/R level, the entry is allowed. The tight proximity to a key level provides the directional bias that the broader trend classification lacks.
 
 ---
 
@@ -96,7 +98,7 @@ Look at the **last 20 one-hour candles**:
 
 All 5 conditions must be true before entering:
 
-1. **Trend is UPTREND** on the 1-hour chart (higher highs + higher lows)
+1. **Trend is UPTREND**, OR trend is SIDEWAYS and hammer candle low is within **0.2%** of the support level. Trend is DOWNTREND → always blocked for calls.
 2. **Fewer than 2 options positions** currently open
 3. **Key support level identified** from the last 20 candles or a $5 round number
 4. **Hammer candle formed AT or NEAR support** (within 0.5%):
@@ -117,7 +119,7 @@ _Example: SPY at $740 → buy $750 call expiring within 14 days_
 
 All 5 conditions must be true before entering:
 
-1. **Trend is DOWNTREND** on the 1-hour chart (lower highs + lower lows)
+1. **Trend is DOWNTREND**, OR trend is SIDEWAYS and hanging man candle high is within **0.2%** of the resistance level. Trend is UPTREND → always blocked for puts.
 2. **Fewer than 2 options positions** currently open
 3. **Key resistance level identified** from the last 20 candles or a $5 round number
 4. **Hanging man candle formed AT or NEAR resistance** (within 0.5%):
@@ -244,7 +246,7 @@ At scan start, read `~/trading-agent/data/regime.json`. The Markov regime overri
 | **BULL_TRENDING** | Favor calls. If a symbol has both CALL and PUT signals, take the CALL only. |
 | **BEAR_TRENDING** | Favor puts. If a symbol has both CALL and PUT signals, take the PUT only. |
 | **HIGH_VOLATILITY** | All auto-trades blocked. Bot scans but does not enter. |
-| **SIDEWAYS** | **HARD BLOCK** on all standard entries. Only catalyst exception trades allowed (see below). |
+| **SIDEWAYS** | Opposite-direction signals blocked. SIDEWAYS trend allowed with 0.2% S/R proximity. Max 1 open position. |
 
 **Default on failure:** If `regime.json` is missing or unreadable, default to SIDEWAYS.
 
@@ -252,35 +254,21 @@ Regime + tomorrow forecast are shown at the top of every scan output and in the 
 
 ---
 
-## SIDEWAYS CATALYST-ONLY MODE
+## SIDEWAYS ENTRY RULES
 
-_Implemented 2026-06-02. Code: `scripts/options_research.py`, enforced in `run_scan` / `run_monitor`._
+_Updated 2026-06-02._
 
-In SIDEWAYS, the normal 6/6 entry criteria are **not sufficient**. A catalyst must also be present.
+When regime is SIDEWAYS, entries use the same normal filters as BULL/BEAR with these adjustments:
 
-### Rule 1 — Hard Block
-All standard directional entries are blocked. No entries without an active catalyst.
+| Rule | Detail |
+|------|--------|
+| Trend block | Hammer in downtrend blocked; hanging man in uptrend blocked |
+| SIDEWAYS trend | Allowed if signal candle within **0.2%** of matched S/R level |
+| Position limit | **1 max** (vs. normal 2) |
+| Drift | 0.5% (same as all regimes) |
+| All other rules | Confirmation candle, $200 budget, time gate, etc. — all apply normally |
 
-### Rule 2 — Catalyst Exception Gate
-All six sub-conditions must be true simultaneously:
-
-| Sub-condition | Value |
-|---------------|-------|
-| Earnings within N days | ≤ 5 calendar days for the specific symbol |
-| IV Rank | ≤ 45 (low IV — options are cheap, run-up not priced in) |
-| Day of week | Not Friday |
-| Signal score | 6/6 (all normal gates pass) |
-| Open positions | ≤ 1 total |
-| Risk per trade | ≤ 0.5% of portfolio |
-
-### Rule 3 — Mandatory Pre-Earnings Exit
-If a held position's underlying has earnings **today**, the bot force-closes by market sell before 3:30 PM ET. The strategy trades the run-up, never the binary event.
-
-### Rule 4 — No Friday Entries
-No new positions opened on Fridays while in SIDEWAYS.
-
-### Rule 5 — Normal Rules Resume
-When regime moves to BULL_TRENDING or BEAR_TRENDING, all normal rules resume with no restrictions.
+**Normal rules resume** when regime moves to BULL_TRENDING or BEAR_TRENDING.
 
 ---
 
@@ -288,7 +276,7 @@ When regime moves to BULL_TRENDING or BEAR_TRENDING, all normal rules resume wit
 
 1. Watchlist symbols only — SPY, AAPL, AMZN, NVDA, MSFT, GOOGL, GLD, PLTR, JPM, IWM
 2. 1-hour candles only for all analysis
-3. No trade when trend is sideways
+3. No call when trend is downtrend; no put when trend is uptrend. SIDEWAYS allowed with 0.2% S/R proximity.
 4. No trade without confirmation candle
 5. Max 2 open positions
 6. Max $200 per trade
